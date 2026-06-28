@@ -13,6 +13,9 @@ function REPLECS_SERVER()
 		for player, buf, variants in replicator:collect_updates() do
 			zap.OnReliableUpdates.Fire(player, buf, variants)
 		end
+		for player, buf, variants in replicator:collect_ownership_grant() do
+			zap.OnOwnershipGrant.Fire(player, buf, variants)
+		end
 	end
 	if unreliable_interval() then
 		for player, buf, variants in replicator:collect_unreliable() do
@@ -20,6 +23,14 @@ function REPLECS_SERVER()
 		end
 	end
 end
+
+zap.OnOwnershipReliable.SetCallback(function(player, buf, variants)
+	replicator:apply_ownership_reliable(buf, player, variants)
+end)
+
+zap.OnOwnershipUnreliable.SetCallback(function(player, buf, variants)
+	replicator:apply_ownership_unreliable(buf, player, variants)
+end)
 
 scheduler.System(REPLECS_SERVER)
 return REPLECS_SERVER

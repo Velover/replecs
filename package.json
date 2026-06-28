@@ -23,6 +23,7 @@
     "!**/*.spec.d.ts"
   ],
   "scripts": {
+    "build": "rbxtsc --rojo serve-ts.project.json",
     "serve": "rojo sourcemap serve.project.json -o sourcemap.json --watch && rojo serve serve.project.json"
   },
   "repository": {

@@ -28,3 +28,33 @@ event OnReliableUpdates = {
 		variants: unknown,
 	),
 }
+
+event OnOwnershipGrant = {
+	from: Server,
+	type: Reliable,
+	call: SingleAsync,
+	data: (
+		buf: buffer,
+		variants: unknown,
+	),
+}
+
+event OnOwnershipReliable = {
+	from: Client,
+	type: Reliable,
+	call: SingleAsync,
+	data: (
+		buf: buffer,
+		variants: unknown,
+	),
+}
+
+event OnOwnershipUnreliable = {
+	from: Client,
+	type: OrderedUnreliable,
+	call: SingleAsync,
+	data: (
+		buf: buffer,
+		variants: unknown,
+	),
+}

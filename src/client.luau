@@ -94,6 +94,10 @@ export type Client = ClientImp & {
 	registered_custom_ids: { [CustomId]: boolean },
 	component_serdes: Map<Component, types.Serdes>,
 
+	ownership_grants: Map<Entity, Map<Component, boolean>>,
+	ownership_buffer: Map<Entity, Map<Component, { value: any }>>,
+	ownership_unreliable_buffer: Map<Entity, Map<Component, { value: any }>>,
+
 	init: (self: Client, world: World?) -> (),
 	destroy: (self: Client) -> (),
 	handle_global: (self: Client, handler: (id: number) -> Entity) -> (),
@@ -127,6 +131,12 @@ export type Client = ClientImp & {
 	apply_updates: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 	apply_unreliable: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
 
+	apply_ownership_grant: (self: Client, buf: buffer, all_variants: { { any } }?) -> (),
+	has_ownership: (self: Client, entity: Entity, component: Component) -> boolean,
+	request_set: (self: Client, entity: Entity, component: Component, value: any, unreliable: boolean?) -> (),
+	collect_ownership: (self: Client) -> () -> (buffer, { { any } }),
+	collect_ownership_unreliable: (self: Client) -> () -> (buffer, { { any } }),
+
 	generate_handshake: (self: Client) -> types.HandshakeInfo,
 	verify_handshake: (self: Client, handshake: types.HandshakeInfo) -> (boolean, string?),
 }
@@ -147,6 +157,9 @@ local PACKET_TYPES = {
 	entity = 2,
 	updates = 3,
 	unreliable = 4,
+	ownership_reliable = 5,
+	ownership_unreliable = 6,
+	ownership_grant = 7,
 }
 
 local ECS_NAME = common.ecs_name
@@ -368,6 +381,20 @@ function client_replicator.entity_remove(client: Client, entity: Entity, id: Ent
 		else
 			WORLD_REMOVE(client.world, entity, id)
 		end
+	end
+
+	-- clean up ownership data for this component on this entity
+	local entity_grants = client.ownership_grants[entity]
+	if entity_grants then
+		entity_grants[id] = nil
+	end
+	local entity_buffer = client.ownership_buffer[entity]
+	if entity_buffer then
+		entity_buffer[id] = nil
+	end
+	local entity_unreliable_buffer = client.ownership_unreliable_buffer[entity]
+	if entity_unreliable_buffer then
+		entity_unreliable_buffer[id] = nil
 	end
 end
 
@@ -1392,6 +1419,233 @@ function client_replicator.apply_unreliable(client: Client, buf: buffer, all_var
 	client_replicator.finish_replication(client)
 end
 
+function client_replicator.write_component_id(client: Client, c: Cursor, component: Entity)
+	local shared_components = client.shared.components
+	local encoded = shared_components.members[component]
+	if not encoded then
+		common.log_error(`attempted to write a non-shared component `, common.log_component(client.world, component))
+		return
+	end
+	cursor.write_span(c, encoded, #shared_components.keys)
+end
+
+function client_replicator.write_variant_value(
+	client: Client,
+	c: Cursor,
+	log_component: Component,
+	serdes: types.Serdes?,
+	value: any,
+	variants: { any }
+)
+	if serdes then
+		local output, serdes_variants = serdes.serialize(value)
+
+		if serdes.includes_variants then
+			if serdes_variants == nil then
+				cursor.writeu8(c, 128)
+			else
+				local start_variants = #variants
+				if #serdes_variants > 0 then
+					table.move(serdes_variants, 1, #serdes_variants, #variants + 1, variants)
+				end
+				cursor.write_vlq(c, #serdes_variants)
+				cursor.write_vlq(c, start_variants + 1)
+			end
+		elseif serdes_variants ~= nil then
+			common.log_error(
+				"serdes: serializer provided variants yet includes_variants is not set to true for component: ",
+				common.log_component(client.world, log_component)
+			)
+		end
+
+		local bytespan = serdes.bytespan
+		cursor.write_buffer(c, output)
+		if bytespan then
+			if bytespan ~= buffer.len(output) then
+				common.log_error(
+					`bytespan: {bytespan} mismatch for buffer length: {buffer.len(output)} in component: `,
+					common.log_component(client.world, log_component)
+				)
+			end
+		else
+			local len = buffer.len(output)
+			cursor.write_vlq(c, len)
+		end
+	else
+		if value == nil then
+			cursor.writeu8(c, 128)
+		else
+			table.insert(variants, value :: any)
+			cursor.write_vlq(c, #variants)
+		end
+	end
+end
+
+function client_replicator.write_component_value(
+	client: Client,
+	c: Cursor,
+	component: Component,
+	value: any,
+	variants: { any }
+)
+	local serdes = client.component_serdes[component] or client.shared.serdes[component]
+	client_replicator.write_variant_value(client, c, component, serdes, value, variants)
+end
+
+function client_replicator.write_entity_id(client: Client, c: Cursor, entity: Entity)
+	local server_id = client.client_ids[entity]
+	if server_id then
+		cursor.writeu40(c, server_id)
+		cursor.writeu8(c, ENTITY_ID_TYPES.entity)
+	else
+		-- shared component entity
+		local shared_id = client.shared.components.members[entity]
+		if shared_id then
+			cursor.writeu8(c, shared_id)
+			cursor.writeu8(c, ENTITY_ID_TYPES.shared)
+		else
+			common.log_error(`attempted to write an entity that has no server id or shared id: {entity}`)
+		end
+	end
+end
+
+function client_replicator.apply_ownership_grant(client: Client, buf: buffer, all_variants: { { any } }?)
+	client_replicator.resolve_dirty(client)
+	client.is_replicating = true
+
+	local c = cursor.from(buf)
+	check_packet_type(c, PACKET_TYPES.ownership_grant)
+
+	-- clear old grants
+	table.clear(client.ownership_grants)
+
+	local total_packets = cursor.read_vlq(c)
+	local variant_start = (all_variants and #all_variants + 1) :: number
+
+	for _a = 1, total_packets do
+		local total_grants = cursor.read_vlq(c)
+		for _ = 1, total_grants do
+			local entity, _server_id, _id_type = client_replicator.read_entity_id(client, c)
+			local component = client_replicator.read_component_id(client, c)
+
+			if entity then
+				local entity_grants = client.ownership_grants[entity]
+				if not entity_grants then
+					entity_grants = {}
+					client.ownership_grants[entity] = entity_grants
+				end
+				entity_grants[component] = true
+			end
+		end
+	end
+
+	client_replicator.finish_replication(client)
+end
+
+function client_replicator.has_ownership(client: Client, entity: Entity, component: Component): boolean
+	local entity_grants = client.ownership_grants[entity]
+	if not entity_grants then
+		return false
+	end
+	return entity_grants[component] == true
+end
+
+function client_replicator.request_set(
+	client: Client,
+	entity: Entity,
+	component: Component,
+	value: any,
+	unreliable: boolean?
+)
+	local entity_grants = client.ownership_grants[entity]
+	if not entity_grants or not entity_grants[component] then
+		common.log_warn(`cannot set component: entity does not have ownership grant for this component`)
+		return
+	end
+
+	-- set locally for immediate client-side prediction
+	WORLD_SET(client.world, entity, component, value)
+
+	local target_buffer = if unreliable then client.ownership_unreliable_buffer else client.ownership_buffer
+	local entity_buffer = target_buffer[entity]
+	if not entity_buffer then
+		entity_buffer = {}
+		target_buffer[entity] = entity_buffer
+	end
+	entity_buffer[component] = { value = value }
+end
+
+local function collect_ownership_from_buffer(
+	client: Client,
+	source_buffer: Map<Entity, Map<Component, { value: any }>>,
+	packet_type: number
+): () -> (buffer, { { any } })
+	client_replicator.resolve_dirty(client)
+	local packets: Array<{ buffer: buffer, variants: { any } }> = {}
+	local total_size = 0
+
+	for entity, components_map in source_buffer do
+		local c = cursor.new()
+		local variants = {} :: Array<{ any }>
+		local total_entries = 0
+
+		for component, entry in components_map do
+			-- write in LIFO order: value first, component_id, entity_id last
+			client_replicator.write_component_value(client, c, component, entry.value, variants)
+			client_replicator.write_component_id(client, c, component)
+			client_replicator.write_entity_id(client, c, entity)
+			total_entries += 1
+		end
+
+		if total_entries > 0 then
+			cursor.write_vlq(c, total_entries)
+			local output = cursor.close(c)
+			table.insert(packets, { buffer = output, variants = variants })
+			total_size += buffer.len(output)
+		end
+	end
+
+	table.clear(source_buffer)
+
+	if #packets == 0 then
+		return function()
+			return nil :: any
+		end
+	end
+
+	local combined = buffer.create(total_size + utils.vlq_span(#packets) + 1)
+	local offset = 0
+	local all_variants: { { any } } = {}
+
+	for _, packet in packets do
+		buffer.copy(combined, offset, packet.buffer)
+		offset += buffer.len(packet.buffer)
+		table.insert(all_variants, packet.variants)
+	end
+
+	-- write total packets and packet type
+	local c_temp = { offset = offset, buffer = combined }
+	cursor.write_vlq(c_temp, #packets)
+	buffer.writeu8(combined, buffer.len(combined) - 1, packet_type)
+
+	local done = false
+	return function()
+		if done then
+			return nil :: any
+		end
+		done = true
+		return combined, all_variants
+	end
+end
+
+function client_replicator.collect_ownership(client: Client)
+	return collect_ownership_from_buffer(client, client.ownership_buffer, PACKET_TYPES.ownership_reliable)
+end
+
+function client_replicator.collect_ownership_unreliable(client: Client)
+	return collect_ownership_from_buffer(client, client.ownership_unreliable_buffer, PACKET_TYPES.ownership_unreliable)
+end
+
 function client_replicator.set_serdes(client: Client, component: Component, serdes: types.Serdes)
 	client.component_serdes[component] = serdes
 	client.is_shared_dirty = true
@@ -1440,6 +1694,9 @@ function client_replicator.init(client: Client, wrd: World?)
 			client.client_ids[entity] = nil
 		end
 		client.network_hooks.deleted[entity] = nil
+		client.ownership_grants[entity] = nil
+		client.ownership_buffer[entity] = nil
+		client.ownership_unreliable_buffer[entity] = nil
 	end))
 
 	hook(HOOK_ADDED(world, components.serdes, function(component, _, serdes)
@@ -1655,6 +1912,10 @@ local function create(world: World?, components: types.Components?): Client
 	self.is_replicating = false
 	self.hooked = {}
 	self.registered_custom_ids = {}
+
+	self.ownership_grants = {}
+	self.ownership_buffer = {}
+	self.ownership_unreliable_buffer = {}
 
 	self.addition_hooks = {}
 	self.network_hooks = {

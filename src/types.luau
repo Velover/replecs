@@ -32,6 +32,7 @@ export type Serdes<T = any> = {
 	bytespan: number?,
 	serialize: (value: T) -> (buffer, ...{ any }),
 	deserialize: (buffer, ...{ any }) -> T,
+	ownership_validate: ((raw_value: T) -> boolean)?,
 }
 
 export type Components = {
@@ -45,6 +46,11 @@ export type Components = {
 	Unreliable: Component<AnyFilter?>,
 	relation: Component<AnyFilter?>,
 	Relation: Component<AnyFilter?>,
+
+	throttle: Component<number?>,
+	Throttle: Component<number?>,
+	owned: Component<AnyFilter?>,
+	Owned: Component<AnyFilter?>,
 
 	serdes: Component<Serdes>,
 	Serdes: Component<Serdes>,

@@ -53,6 +53,22 @@ type EntityStorage = {
 
 type Storage = { [Entity]: EntityStorage }
 
+type OwnershipEntry = {
+	player: Player?,
+}
+
+type ThrottledEntityEntry = {
+	component_changes: Map<Component, any>,
+	tag_changes: Set<Component>,
+	removals: Set<Component>,
+}
+
+type ThrottleEntry = {
+	last_flush: number,
+	interval: number,
+	entities: Map<Entity, ThrottledEntityEntry>,
+}
+
 export type ServerImp = {
 	set_networked: (self: Server, entity: Entity, filter: AnyFilter?) -> (),
 	set_reliable: (self: Server, entity: Entity, component: Component, filter: AnyFilter?) -> (),
@@ -71,6 +87,10 @@ export type ServerImp = {
 
 	set_serdes: <T>(self: Server, id: Component<T>, serdes: types.Serdes<T>) -> (),
 	remove_serdes: (self: Server, id: Component) -> (),
+
+	collect_ownership_grant: (self: Server) -> () -> (Player, buffer, { { any } }),
+	apply_ownership_reliable: (self: Server, buf: buffer, player: Player, all_variants: { { any } }?) -> (),
+	apply_ownership_unreliable: (self: Server, buf: buffer, player: Player, all_variants: { { any } }?) -> (),
 }
 
 export type Server = ServerImp & {
@@ -99,6 +119,10 @@ export type Server = ServerImp & {
 	registered_custom_ids: Map<CustomId, boolean>,
 	component_serdes: Map<Component, types.Serdes>,
 
+	throttle: Map<Component, ThrottleEntry>,
+	ownership: Map<Entity, Map<Component, OwnershipEntry>>,
+	ownership_dirty: Set<Player>,
+
 	init: (self: Server, world: World?) -> (),
 	destroy: (self: Server) -> (),
 
@@ -117,6 +141,7 @@ export type Server = ServerImp & {
 
 	add_player_alias: (self: Server, client: Player, alias: any) -> (),
 	remove_player_alias: (self: Server, alias: any) -> (),
+	remove_client: (self: Server, player: Player) -> (),
 
 	generate_handshake: (self: Server) -> types.HandshakeInfo,
 	verify_handshake: (self: Server, handshake: types.HandshakeInfo) -> (boolean, string?),
@@ -144,6 +169,9 @@ local PACKET_TYPES = {
 	entity = 2,
 	updates = 3,
 	unreliable = 4,
+	ownership_reliable = 5,
+	ownership_unreliable = 6,
+	ownership_grant = 7,
 }
 
 local MAX_PACKET_SIZE = 900
@@ -205,6 +233,55 @@ local function HOOK_PAIR_REMOVED(world: World, pair_id: Entity, callback: (Entit
 		end
 		callback(entity, id)
 	end)
+end
+
+local function check_packet_type(c: Cursor, expected_byte: number)
+	local got_byte = cursor.readu8(c)
+	if got_byte ~= expected_byte then
+		local got_type: string? = nil
+		local expected_type: string? = nil
+
+		for packet_type, byte in PACKET_TYPES :: { [string]: number } do
+			if byte == got_byte then
+				got_type = packet_type
+			elseif byte == expected_byte then
+				expected_type = packet_type
+			end
+		end
+		common.log_error(
+			`packet type mismatch, expected: {expected_type or "(unknown)"} got: {got_type or "(unknown)"} instead`
+		)
+	end
+end
+
+function server_replicator.read_entity_id(server: Server, c: Cursor): (Entity?, number?, number?)
+	local id_type = cursor.readu8(c)
+
+	if id_type <= GLOBAL_ID_OFFSET then
+		if
+			id_type == ENTITY_ID_TYPES.entity
+			or id_type == ENTITY_ID_TYPES.custom_id
+			or id_type == ENTITY_ID_TYPES.custom_handler
+		then
+			local server_id = cursor.readu40(c)
+			return server_id :: any, server_id, id_type
+		elseif id_type == ENTITY_ID_TYPES.shared then
+			return server_replicator.read_component_id(server, c), nil, id_type
+		end
+		error(`malformed entity type {id_type} ` .. cursor.readu32(c))
+	else
+		return nil, nil, id_type
+	end
+end
+
+function server_replicator.read_component_id(server: Server, c: Cursor): Entity
+	local shared_components = server.shared.components
+	local shared_id = cursor.read_span(c, #shared_components.keys)
+	local component = shared_components.indexes[shared_id]
+	if not component then
+		common.log_error(`received a non shared component: {shared_id}`)
+	end
+	return component
 end
 
 local function QUERY_TRACKING_TYPE(server: Server, track_type: Component)
@@ -269,7 +346,34 @@ local function get_or_set_entity_storage(server: Server, entity: Entity): Entity
 	return storage
 end
 
-local function allocate_component_change(server: Server, entity: Entity, component: Component, value: any)
+local function check_ownership_mutual_exclusion(server: Server, entity: Entity, component: Component): boolean
+	local entity_ownership = server.ownership[entity]
+	if not entity_ownership then
+		return false
+	end
+	local entry = entity_ownership[component]
+	if entry and entry.player ~= nil then
+		common.log_warn(
+			`server cannot modify component {common.log_component(server.world, component)} on entity {entity}: owned by player`
+		)
+		return true
+	end
+	return false
+end
+
+local function allocate_component_change(
+	server: Server,
+	entity: Entity,
+	component: Component,
+	value: any,
+	skip_ownership_check: boolean?
+)
+	if not skip_ownership_check then
+		if check_ownership_mutual_exclusion(server, entity, component) then
+			return
+		end
+	end
+
 	local storage = get_or_set_entity_storage(server, entity)
 
 	local non_nil = if value == nil then NIL_COMPONENT_VALUE else value
@@ -288,6 +392,10 @@ local function allocate_unreliable_addition(server: Server, entity: Entity, comp
 end
 
 local function allocate_tag_addition(server: Server, entity: Entity, tag: Component)
+	if check_ownership_mutual_exclusion(server, entity, tag) then
+		return
+	end
+
 	local storage = get_or_set_entity_storage(server, entity)
 	storage.tags[tag] = true
 
@@ -354,6 +462,10 @@ local function allocate_relation_tag_addition(server: Server, entity: Entity, re
 end
 
 local function allocate_component_removal(server: Server, entity: Entity, component: Component)
+	if check_ownership_mutual_exclusion(server, entity, component) then
+		return
+	end
+
 	local storage = get_or_set_entity_storage(server, entity)
 	storage.components[component] = nil
 
@@ -369,6 +481,10 @@ local function allocate_unreliable_removal(server: Server, entity: Entity, compo
 end
 
 local function allocate_tag_removal(server: Server, entity: Entity, tag: Component)
+	if check_ownership_mutual_exclusion(server, entity, tag) then
+		return
+	end
+
 	local storage = get_or_set_entity_storage(server, entity)
 	storage.tags[tag] = nil
 
@@ -419,6 +535,83 @@ local function allocate_relation_tag_removal(server: Server, entity: Entity, rel
 	end
 end
 
+local function buffer_or_allocate_component_change(
+	server: Server,
+	entity: Entity,
+	component: Component,
+	value: any,
+	is_unreliable: boolean?,
+	skip_ownership_check: boolean?
+)
+	local throttle_entry = server.throttle[component]
+	if throttle_entry then
+		local entity_entry = throttle_entry.entities[entity]
+		if not entity_entry then
+			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
+			throttle_entry.entities[entity] = entity_entry
+		end
+		entity_entry.component_changes[component] = value
+		entity_entry.removals[component] = nil
+		return
+	end
+
+	if is_unreliable then
+		allocate_unreliable_addition(server, entity, component)
+		return
+	end
+
+	allocate_component_change(server, entity, component, value, skip_ownership_check)
+end
+
+local function _buffer_or_allocate_tag_addition(server: Server, entity: Entity, tag: Component)
+	local throttle_entry = server.throttle[tag]
+	if throttle_entry then
+		local entity_entry = throttle_entry.entities[entity]
+		if not entity_entry then
+			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
+			throttle_entry.entities[entity] = entity_entry
+		end
+		entity_entry.tag_changes[tag] = true
+		entity_entry.removals[tag] = nil
+		return
+	end
+
+	allocate_tag_addition(server, entity, tag)
+end
+
+local function _buffer_or_allocate_component_removal(server: Server, entity: Entity, component: Component)
+	local throttle_entry = server.throttle[component]
+	if throttle_entry then
+		local entity_entry = throttle_entry.entities[entity]
+		if not entity_entry then
+			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
+			throttle_entry.entities[entity] = entity_entry
+		end
+		entity_entry.removals[component] = true
+		entity_entry.component_changes[component] = nil
+		entity_entry.tag_changes[component] = nil
+		return
+	end
+
+	allocate_component_removal(server, entity, component)
+end
+
+local function _buffer_or_allocate_tag_removal(server: Server, entity: Entity, tag: Component)
+	local throttle_entry = server.throttle[tag]
+	if throttle_entry then
+		local entity_entry = throttle_entry.entities[entity]
+		if not entity_entry then
+			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
+			throttle_entry.entities[entity] = entity_entry
+		end
+		entity_entry.removals[tag] = true
+		entity_entry.tag_changes[tag] = nil
+		return
+	end
+
+	allocate_tag_removal(server, entity, tag)
+end
+
 local function cleanup_entity(server: Server, entity: Entity)
 	server.alive_tracked[entity] = nil
 	server.storage[entity] = nil
@@ -426,6 +619,14 @@ local function cleanup_entity(server: Server, entity: Entity)
 	server.custom_ids[entity] = nil
 	server.additions[entity] = nil
 	server.masking:cleanup_entity(entity)
+
+	-- purge from throttle buffers
+	for _, throttle_entry in server.throttle do
+		throttle_entry.entities[entity] = nil
+	end
+
+	-- purge ownership
+	server.ownership[entity] = nil
 
 	local track_info = server.track_info.entities[entity]
 	if track_info then
@@ -516,9 +717,17 @@ local function hook_component(server: Server, component: Component, hooked: Comp
 		end
 
 		if track_type == COMPONENT_TYPES.component then
-			allocate_component_change(server, entity, component, value)
+			if server.additions[entity] then
+				allocate_component_change(server, entity, component, value)
+			else
+				buffer_or_allocate_component_change(server, entity, component, value, false)
+			end
 		elseif track_type == COMPONENT_TYPES.tag then
-			allocate_tag_addition(server, entity, component)
+			if server.additions[entity] then
+				allocate_tag_addition(server, entity, component)
+			else
+				_buffer_or_allocate_tag_addition(server, entity, component)
+			end
 		elseif track_type == COMPONENT_TYPES.relation then
 			if not IS_PAIR(id) then
 				return
@@ -539,7 +748,7 @@ local function hook_component(server: Server, component: Component, hooked: Comp
 			return
 		end
 		if track_type == COMPONENT_TYPES.component then
-			allocate_component_change(server, entity, component, value)
+			buffer_or_allocate_component_change(server, entity, component, value, false)
 		elseif track_type == COMPONENT_TYPES.relation_component then
 			if not IS_PAIR(id) then
 				return
@@ -554,9 +763,17 @@ local function hook_component(server: Server, component: Component, hooked: Comp
 		end
 
 		if track_type == COMPONENT_TYPES.component then
-			allocate_component_removal(server, entity, component)
+			if server.additions[entity] then
+				allocate_component_removal(server, entity, component)
+			else
+				_buffer_or_allocate_component_removal(server, entity, component)
+			end
 		elseif track_type == COMPONENT_TYPES.tag then
-			allocate_tag_removal(server, entity, component)
+			if server.additions[entity] then
+				allocate_tag_removal(server, entity, component)
+			else
+				_buffer_or_allocate_tag_removal(server, entity, component)
+			end
 		elseif track_type == COMPONENT_TYPES.relation then
 			if not IS_PAIR(id) then
 				return
@@ -758,6 +975,24 @@ local function untrack_entity_component(server: Server, entity: Entity, componen
 	if storage then
 		storage.components[component] = nil
 		storage.tags[component] = nil
+	end
+
+	-- purge from throttle buffers
+	local throttle_entry = server.throttle[component]
+	if throttle_entry then
+		throttle_entry.entities[entity] = nil
+	end
+
+	-- purge ownership for this component
+	local entity_ownership = server.ownership[entity]
+	if entity_ownership then
+		local entry = entity_ownership[component]
+		if entry then
+			if entry.player then
+				server.ownership_dirty[entry.player] = true
+			end
+			entity_ownership[component] = nil
+		end
 	end
 
 	remove_entity_component_tracked(server, entity, component)
@@ -1284,6 +1519,31 @@ function server_replicator.collect_updates(server: Server)
 	local world = server.world
 	local packets: { [Player]: MemberPackets } = {}
 
+	-- flush throttle buffers
+	local now = os.clock()
+	for component, throttle_entry in server.throttle do
+		if now - throttle_entry.last_flush >= throttle_entry.interval then
+			throttle_entry.last_flush = now
+			for entity, entity_entry in throttle_entry.entities do
+				-- deletions take priority: if a component was removed AND had pending value changes, skip the value change
+				for comp in entity_entry.removals do
+					allocate_component_removal(server, entity, comp)
+				end
+				for comp, value in entity_entry.component_changes do
+					if not entity_entry.removals[comp] then
+						allocate_component_change(server, entity, comp, value)
+					end
+				end
+				for tag in entity_entry.tag_changes do
+					if not entity_entry.removals[tag] then
+						allocate_tag_addition(server, entity, tag)
+					end
+				end
+			end
+			table.clear(throttle_entry.entities)
+		end
+	end
+
 	for _, storage in server.masking.storages do
 		local c = cursor.new()
 		local variants = {}
@@ -1673,6 +1933,314 @@ function server_replicator.collect_unreliable(server: Server)
 	return create_unreliable_packet_iterator(packets)
 end
 
+function server_replicator.collect_ownership_grant(server: Server)
+	server_replicator.resolve_dirty(server)
+	local packets: { [Player]: MemberPackets } = {}
+
+	for player in server.ownership_dirty do
+		if not utils.is_client_valid(player) then
+			continue
+		end
+
+		local c = cursor.new()
+		local variants = {} :: Array<{ any }>
+		local total_grants = 0
+
+		for entity, components_map in server.ownership do
+			for component, entry in components_map do
+				if entry.player ~= player then
+					continue
+				end
+
+				-- write: component_id, entity_id (LIFO order)
+				server_replicator.write_component_id(server, c, component)
+				server_replicator.write_entity_id(server, c, entity)
+				total_grants += 1
+			end
+		end
+
+		if total_grants > 0 then
+			cursor.write_vlq(c, total_grants)
+		else
+			-- write 0 grants so client clears its stale grants on revocation
+			cursor.write_vlq(c, 0)
+		end
+		local output = cursor.close(c)
+
+		local member_packets: MemberPackets = {
+			packets = { { buffer = output, variants = variants } },
+			variants = { variants },
+			total_size = buffer.len(output),
+		}
+		packets[player] = member_packets
+	end
+
+	table.clear(server.ownership_dirty)
+
+	local iterated: Player? = nil
+	local function iterator()
+		local player, data = next(packets, iterated)
+		while not utils.is_client_valid(player) do
+			if not player and not data then
+				break
+			end
+			player, data = next(packets, player)
+		end
+		if not player then
+			return nil :: any
+		end
+		iterated = player
+
+		local combined, variants = combine_packet_outputs(data.packets, data.total_size, PACKET_TYPES.ownership_grant)
+		return player, combined, variants
+	end
+	return iterator :: PacketIterator
+end
+
+function server_replicator.apply_ownership_reliable(
+	server: Server,
+	buf: buffer,
+	player: Player,
+	all_variants: { { any } }?
+)
+	local c = cursor.from(buf)
+	check_packet_type(c, PACKET_TYPES.ownership_reliable)
+	local total_packets = cursor.read_vlq(c)
+	local variant_start = (all_variants and #all_variants + 1) :: number
+
+	for a = 1, total_packets do
+		local variants = all_variants and all_variants[variant_start - a]
+		local total_entries = cursor.read_vlq(c)
+
+		for _ = 1, total_entries do
+			local entity, _server_id, _id_type = server_replicator.read_entity_id(server, c)
+			local component = server_replicator.read_component_id(server, c)
+
+			if not entity then
+				-- entity doesn't exist on server, skip
+				-- read the value to advance cursor (deserialize + skip)
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				if serdes then
+					local bytespan = serdes.bytespan or cursor.read_vlq(c)
+					cursor.read_buffer(c, bytespan)
+					if serdes.includes_variants then
+						local start_variant = cursor.read_vlq(c)
+						if start_variant > 0 then
+							cursor.read_vlq(c) -- skip size
+						end
+					end
+				else
+					cursor.read_vlq(c)
+				end
+				continue
+			end
+
+			-- verify ownership
+			local entity_ownership = server.ownership[entity]
+			if not entity_ownership then
+				-- no ownership, skip value
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				if serdes then
+					local bytespan = serdes.bytespan or cursor.read_vlq(c)
+					cursor.read_buffer(c, bytespan)
+					if serdes.includes_variants then
+						local start_variant = cursor.read_vlq(c)
+						if start_variant > 0 then
+							cursor.read_vlq(c)
+						end
+					end
+				else
+					cursor.read_vlq(c)
+				end
+				continue
+			end
+
+			local entry = entity_ownership[component]
+			if not entry or entry.player ~= player then
+				-- not owned by this player, skip value
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				if serdes then
+					local bytespan = serdes.bytespan or cursor.read_vlq(c)
+					cursor.read_buffer(c, bytespan)
+					if serdes.includes_variants then
+						local start_variant = cursor.read_vlq(c)
+						if start_variant > 0 then
+							cursor.read_vlq(c)
+						end
+					end
+				else
+					cursor.read_vlq(c)
+				end
+				continue
+			end
+
+			-- deserialize the value
+			local serdes = server.component_serdes[component] or server.shared.serdes[component]
+			local value: any
+			if serdes then
+				local bytespan = serdes.bytespan or cursor.read_vlq(c)
+				local appended = cursor.read_buffer(c, bytespan)
+				local serdes_variants: { any }? = nil
+
+				if serdes.includes_variants then
+					local start_variant = cursor.read_vlq(c)
+					if start_variant > 0 then
+						local size = cursor.read_vlq(c)
+						serdes_variants = if variants
+							then table.move(variants, start_variant, start_variant + size - 1, 1, {})
+							else {}
+					end
+				end
+
+				value = (serdes :: any).deserialize(appended, serdes_variants :: any)
+
+				-- validate ownership value
+				if serdes.ownership_validate then
+					if not serdes.ownership_validate(value) then
+						common.log_warn(
+							`ownership validation failed for component {common.log_component(server.world, component)}`
+						)
+						continue
+					end
+				end
+			else
+				local variant_id = cursor.read_vlq(c)
+				if variant_id == 0 then
+					value = nil
+				else
+					value = if variants then variants[variant_id] else nil
+				end
+			end
+
+			-- apply the value (buffered if throttled)
+			buffer_or_allocate_component_change(server, entity, component, value, false, true)
+		end
+	end
+end
+
+function server_replicator.apply_ownership_unreliable(
+	server: Server,
+	buf: buffer,
+	player: Player,
+	all_variants: { { any } }?
+)
+	local c = cursor.from(buf)
+	check_packet_type(c, PACKET_TYPES.ownership_unreliable)
+	local total_packets = cursor.read_vlq(c)
+	local variant_start = (all_variants and #all_variants + 1) :: number
+
+	for a = 1, total_packets do
+		local variants = all_variants and all_variants[variant_start - a]
+		local total_entries = cursor.read_vlq(c)
+
+		for _ = 1, total_entries do
+			local entity, _server_id, _id_type = server_replicator.read_entity_id(server, c)
+			local component = server_replicator.read_component_id(server, c)
+
+			if not entity then
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				if serdes then
+					local bytespan = serdes.bytespan or cursor.read_vlq(c)
+					cursor.read_buffer(c, bytespan)
+					if serdes.includes_variants then
+						local start_variant = cursor.read_vlq(c)
+						if start_variant > 0 then
+							cursor.read_vlq(c)
+						end
+					end
+				else
+					cursor.read_vlq(c)
+				end
+				continue
+			end
+
+			-- verify ownership
+			local entity_ownership = server.ownership[entity]
+			if not entity_ownership then
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				if serdes then
+					local bytespan = serdes.bytespan or cursor.read_vlq(c)
+					cursor.read_buffer(c, bytespan)
+					if serdes.includes_variants then
+						local start_variant = cursor.read_vlq(c)
+						if start_variant > 0 then
+							cursor.read_vlq(c)
+						end
+					end
+				else
+					cursor.read_vlq(c)
+				end
+				continue
+			end
+
+			local entry = entity_ownership[component]
+			if not entry or entry.player ~= player then
+				-- not owned by this player, skip value
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				if serdes then
+					local bytespan = serdes.bytespan or cursor.read_vlq(c)
+					cursor.read_buffer(c, bytespan)
+					if serdes.includes_variants then
+						local start_variant = cursor.read_vlq(c)
+						if start_variant > 0 then
+							cursor.read_vlq(c)
+						end
+					end
+				else
+					cursor.read_vlq(c)
+				end
+				continue
+			end
+
+			-- deserialize the value
+			local serdes = server.component_serdes[component] or server.shared.serdes[component]
+			local value: any
+			if serdes then
+				local bytespan = serdes.bytespan or cursor.read_vlq(c)
+				local appended = cursor.read_buffer(c, bytespan)
+				local serdes_variants: { any }? = nil
+
+				if serdes.includes_variants then
+					local start_variant = cursor.read_vlq(c)
+					if start_variant > 0 then
+						local size = cursor.read_vlq(c)
+						serdes_variants = if variants
+							then table.move(variants, start_variant, start_variant + size - 1, 1, {})
+							else {}
+					end
+				end
+
+				value = (serdes :: any).deserialize(appended, serdes_variants :: any)
+
+				if serdes.ownership_validate then
+					if not serdes.ownership_validate(value) then
+						common.log_warn(
+							`ownership validation failed for component {common.log_component(server.world, component)}`
+						)
+						continue
+					end
+				end
+			else
+				local variant_id = cursor.read_vlq(c)
+				if variant_id == 0 then
+					value = nil
+				else
+					value = if variants then variants[variant_id] else nil
+				end
+			end
+
+			-- apply the value (buffered if throttled) — ownership writes to storage regardless of transport
+			-- but we also mark it for unreliable replication to other clients
+			buffer_or_allocate_component_change(server, entity, component, value, false, true)
+
+			-- mark as unreliable update for replication to other clients
+			if not server.additions[entity] and server.track_info.networked[entity] then
+				server.masking:allocate_unreliable_addition(entity, component)
+			end
+		end
+	end
+end
+
 function server_replicator.start_networked(server: Server, entity: Entity, filter: AnyFilter?)
 	local masking = server.masking
 
@@ -1815,6 +2383,22 @@ function server_replicator.stop_networked(server: Server, entity: Entity, keep: 
 
 	server.additions[entity] = nil
 	server.track_info.networked[entity] = nil
+
+	-- purge from throttle buffers
+	for _, throttle_entry in server.throttle do
+		throttle_entry.entities[entity] = nil
+	end
+
+	-- purge ownership
+	local entity_ownership = server.ownership[entity]
+	if entity_ownership then
+		for _, entry in entity_ownership do
+			if entry.player then
+				server.ownership_dirty[entry.player] = true
+			end
+		end
+	end
+	server.ownership[entity] = nil
 end
 
 function server_replicator.stop_reliable(server: Server, entity: Entity, component: Component, keep: boolean?)
@@ -2023,6 +2607,79 @@ function server_replicator.init(server: Server, wrd: World?)
 			server_replicator.stop_unreliable(server, entity, component)
 		end))
 
+		-- Throttle relation: (Throttle, component) marks a component as globally throttled
+		hook(HOOK_ADDED(world, LISTEN_RELATION(components.throttle), function(entity, id, interval)
+			local component = PAIR_SECOND(world, id)
+			server.throttle[component] = {
+				last_flush = os.clock(),
+				interval = interval or 1 / 20,
+				entities = {},
+			}
+		end))
+		hook(HOOK_CHANGED(world, LISTEN_RELATION(components.throttle), function(entity, id, interval)
+			local component = PAIR_SECOND(world, id)
+			local entry = server.throttle[component]
+			if entry then
+				entry.interval = interval or 1 / 20
+			end
+		end))
+		hook(HOOK_REMOVED(world, LISTEN_RELATION(components.throttle), function(entity, id)
+			local component = PAIR_SECOND(world, id)
+			-- flush any pending buffer before un-throttling
+			local entry = server.throttle[component]
+			if entry then
+				for buffered_entity, entity_entry in entry.entities do
+					for comp, value in entity_entry.component_changes do
+						allocate_component_change(server, buffered_entity, comp, value)
+					end
+					for tag in entity_entry.tag_changes do
+						allocate_tag_addition(server, buffered_entity, tag)
+					end
+					for comp in entity_entry.removals do
+						allocate_component_removal(server, buffered_entity, comp)
+					end
+				end
+				server.throttle[component] = nil
+			end
+		end))
+
+		-- Owned relation: (Owned, component) grants ownership to a player
+		hook(HOOK_ADDED(world, LISTEN_RELATION(components.owned), function(entity, id, owner)
+			local component = PAIR_SECOND(world, id)
+			local entity_ownership = server.ownership[entity]
+			if not entity_ownership then
+				entity_ownership = {}
+				server.ownership[entity] = entity_ownership
+			end
+			entity_ownership[component] = { player = owner }
+			if owner then
+				server.ownership_dirty[owner] = true
+			end
+		end))
+		hook(HOOK_CHANGED(world, LISTEN_RELATION(components.owned), function(entity, id, owner)
+			local component = PAIR_SECOND(world, id)
+			local entity_ownership = server.ownership[entity]
+			if not entity_ownership then
+				entity_ownership = {}
+				server.ownership[entity] = entity_ownership
+			end
+			entity_ownership[component] = { player = owner }
+			if owner then
+				server.ownership_dirty[owner] = true
+			end
+		end))
+		hook(HOOK_REMOVED(world, LISTEN_RELATION(components.owned), function(entity, id)
+			local component = PAIR_SECOND(world, id)
+			local entity_ownership = server.ownership[entity]
+			if entity_ownership then
+				local entry = entity_ownership[component]
+				if entry and entry.player then
+					server.ownership_dirty[entry.player] = true
+				end
+				entity_ownership[component] = nil
+			end
+		end))
+
 		hook(HOOK_ADDED(world, LISTEN_RELATION(components.custom), function(entity, id)
 			if not IS_PAIR(id) then
 				common.log_error "replecs.custom should be used with a relationship in the server"
@@ -2092,7 +2749,7 @@ function server_replicator.init(server: Server, wrd: World?)
 			server.masking:register_client(player)
 		end)
 		local removed = Players.PlayerRemoving:Connect(function(player)
-			server.masking:unregister_client(player)
+			server:remove_client(player)
 		end)
 		for _, player in Players:GetPlayers() do
 			server.masking:register_client(player)
@@ -2138,6 +2795,25 @@ end
 
 function server_replicator.remove_player_alias(server: Server, alias: any)
 	server.masking.client_aliases[alias] = nil
+end
+
+function server_replicator.remove_client(server: Server, player: Player)
+	server.masking:unregister_client(player)
+
+	-- clean up ownership entries for this player
+	for entity, components_map in server.ownership do
+		for component, entry in components_map do
+			if entry.player == player then
+				components_map[component] = nil
+			end
+		end
+		if next(components_map) == nil then
+			server.ownership[entity] = nil
+		end
+	end
+
+	-- remove from ownership_dirty
+	server.ownership_dirty[player] = nil
 end
 
 function server_replicator.register_custom_id(server: Server, custom_id: CustomId)
@@ -2202,6 +2878,9 @@ local function create(world: World?, components: types.Components?): Server
 	self.custom_ids = {}
 	self.registered_custom_ids = {}
 	self.component_serdes = {}
+	self.throttle = {}
+	self.ownership = {}
+	self.ownership_dirty = {}
 	self.requires_shared_lookup = {
 		self.components.shared,
 		ECS_NAME,

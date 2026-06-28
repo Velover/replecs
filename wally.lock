@@ -4,10 +4,10 @@ registry = "test"
 
 [[package]]
 name = "pepeeltoro41/replecs"
-version = "0.0.1"
-dependencies = [["jecs", "ukendio/jecs@0.8.3"]]
+version = "0.3.1"
+dependencies = [["jecs", "ukendio/jecs@0.10.4"]]
 
 [[package]]
 name = "ukendio/jecs"
-version = "0.8.3"
+version = "0.10.4"
 dependencies = []

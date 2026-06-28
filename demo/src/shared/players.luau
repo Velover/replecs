@@ -4,6 +4,7 @@ local RunService = game:GetService "RunService"
 local c = require(script.Parent.components)
 local replicator = require(script.Parent.replicator)
 local ref = require(ReplicatedStorage.code.utils.ecs.ref)
+local jecs = require(ReplicatedStorage.packages.jecs)
 local replecs = require(ReplicatedStorage.packages.replecs)
 local world = require(script.Parent.world)
 
@@ -27,6 +28,21 @@ function setup(player: Player)
 		replicator.server:set_reliable(entity, c.player)
 		replicator.server:set_reliable(entity, c.unix)
 		world:set(entity, c.unix, 0)
+
+		-- Player cube visuals
+		world:set(entity, c.transform, CFrame.new(0, 50, 0))
+		world:set(entity, c.size, Vector3.new(8, 8, 8))
+		world:set(entity, c.color, BrickColor.random().Color)
+		world:add(entity, c.cube)
+
+		-- Replicate cube components
+		replicator.server:set_reliable(entity, c.size)
+		replicator.server:set_reliable(entity, c.color)
+		replicator.server:set_reliable(entity, c.cube)
+
+		-- Grant ownership of transform to the player for client-side prediction
+		world:set(entity, jecs.pair(replecs.owned, c.transform), player)
+		replicator.server:set_unreliable(entity, c.transform)
 
 		world:set(entity, c.timer, {
 			start = os.clock(),

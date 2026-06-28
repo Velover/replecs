@@ -187,6 +187,8 @@ function utils.create_components(tag: () -> Component, component: () -> Componen
 		components.reliable = component()
 		components.unreliable = component()
 		components.relation = component()
+		components.throttle = component()
+		components.owned = component()
 
 		components.custom = tag()
 	end
@@ -201,6 +203,8 @@ function utils.create_components(tag: () -> Component, component: () -> Componen
 		components.Reliable = components.reliable
 		components.Unreliable = components.unreliable
 		components.Relation = components.relation
+		components.Throttle = components.throttle
+		components.Owned = components.owned
 
 		components.Custom = components.custom
 	end
@@ -217,7 +221,8 @@ function utils.add_component_names(components: types.Components, set: (component
 		set(components.reliable, "replecs.reliable")
 		set(components.unreliable, "replecs.unreliable")
 		set(components.relation, "replecs.relation")
-
+		set(components.throttle, "replecs.throttle")
+		set(components.owned, "replecs.owned")
 		set(components.custom, "replecs.custom")
 	end
 	set(components.custom_handler, "replecs.custom_handler")

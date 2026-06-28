@@ -7,12 +7,14 @@ declare namespace Replecs {
         includes_variants?: false;
         serialize: (value: T) => buffer;
         deserialize: (buffer: buffer) => T;
+        ownership_validate?: (raw_value: T) => boolean;
       }
     | {
         bytespan?: number;
         includes_variants: true;
         serialize: (value: T) => LuaTuple<[buffer, defined[] | undefined]>;
         deserialize: (buffer: buffer, blobs: defined[] | undefined) => T;
+        ownership_validate?: (raw_value: T) => boolean;
       };
 
   type MemberFilterMap = Map<Player, boolean>;
@@ -44,6 +46,7 @@ declare namespace Replecs {
   export interface Shared {
     components: SharedInfo<Entity>;
     custom_ids: SharedInfo<CustomId>;
+    serdes: Map<Entity, SerdesTable>;
   }
   interface HandshakeSerdesInfo {
     includes_variants?: boolean;
@@ -62,6 +65,8 @@ declare namespace Replecs {
     reliable: Entity<MemberFilter>;
     unreliable: Entity<MemberFilter>;
     relation: Entity<MemberFilter>;
+    throttle: Entity<number | undefined>;
+    owned: Entity<MemberFilter>;
 
     serdes: Entity<SerdesTable>;
     custom: Entity;
@@ -73,6 +78,8 @@ declare namespace Replecs {
     Reliable: Entity<MemberFilter>;
     Unreliable: Entity<MemberFilter>;
     Relation: Entity<MemberFilter>;
+    Throttle: Entity<number | undefined>;
+    Owned: Entity<MemberFilter>;
 
     Serdes: Entity<SerdesTable>;
     Custom: Entity;
@@ -92,8 +99,8 @@ declare namespace Replecs {
     world: World;
     inited?: boolean;
 
-    is_relicating: boolean;
-    after_relication_callbacks: [() => void];
+    is_replicating: boolean;
+    after_replication_callbacks: [() => void];
 
     components: Components;
 
@@ -151,6 +158,22 @@ declare namespace Replecs {
     apply_unreliable(buf: buffer, all_variants?: defined[][]): void;
     apply_full(buf: buffer, all_variants?: defined[][]): void;
     apply_entity(buf: buffer, all_variants?: defined[][]): void;
+
+    apply_ownership_grant(buf: buffer, all_variants?: defined[][]): void;
+
+    has_ownership(entity: Entity, component: Entity): boolean;
+    request_set<T>(
+      entity: Entity,
+      component: Entity<T>,
+      value: T,
+      unreliable?: boolean,
+    ): void;
+    collect_ownership(): IterableFunction<
+      LuaTuple<[buffer, defined[][] | undefined]>
+    >;
+    collect_ownership_unreliable(): IterableFunction<
+      LuaTuple<[buffer, defined[][] | undefined]>
+    >;
 
     generate_handshake(): HandshakeInfo;
     verify_handshake(
@@ -213,11 +236,27 @@ declare namespace Replecs {
       LuaTuple<[Player, buffer, defined[][] | undefined]>
     >;
 
+    collect_ownership_grant(): IterableFunction<
+      LuaTuple<[Player, buffer, defined[][] | undefined]>
+    >;
+
+    apply_ownership_reliable(
+      buf: buffer,
+      player: Player,
+      all_variants?: defined[][],
+    ): void;
+    apply_ownership_unreliable(
+      buf: buffer,
+      player: Player,
+      all_variants?: defined[][],
+    ): void;
+
     mark_player_ready(player: Player): void;
     is_player_ready(player: Player): boolean;
 
     add_player_alias(client: Player, alias: defined): void;
     remove_player_alias(alias: defined): void;
+    remove_client(player: Player): void;
 
     generate_handshake(): HandshakeInfo;
     verify_handshake(

@@ -19,7 +19,12 @@ function LOGERROR(...: string): never
 	error("REPLECS ERROR - " .. table.concat({ ... }, " "))
 end
 function LOGWARN(...: string)
-	warn("REPLECS WARN - " .. table.concat({ ... }, " "))
+	local msg = "REPLECS WARN - " .. table.concat({ ... }, " ")
+	if warn then
+		warn(msg)
+	else
+		print(msg)
+	end
 end
 
 function LOG_COMPONENT(world: World, component: Entity)
