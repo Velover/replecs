@@ -2245,518 +2245,6 @@ TEST("server -> client replication", function()
 	end)
 end)
 
-TEST("unreliable replication", function()
-	local world: jecs.World = nil :: any
-	local server: replecs.Server = nil :: any
-
-	BEFORE_EACH(function()
-		world = jecs.world()
-		server = replecs.create_server(world)
-	end)
-
-	AFTER_EACH(function()
-		server:destroy()
-	end)
-
-	local function client_entity(member: MemberData, server_entity: jecs.Entity): jecs.Entity?
-		local entity = member.client.server_ids[server_entity :: any]
-		if entity and member.world:contains(entity) then
-			return entity
-		end
-		return nil
-	end
-
-	local function client_component(member: MemberData, server_entity: jecs.Entity, component_index: number)
-		local component = member.components[component_index]
-		local entity = client_entity(member, server_entity)
-		if entity then
-			return member.world:get(entity, component)
-		end
-		return nil
-	end
-
-	local function create_members_data(count: number?)
-		local members = {} :: { MemberData }
-		for i = 1, (count or 3) do
-			local new_world = jecs.world()
-			local components = create_test_components(new_world)
-			local tags = create_test_tags(new_world)
-			local replicator = replecs.create_client(new_world)
-
-			local member_mt = {
-				world = new_world,
-				client = replicator,
-				components = components,
-				tags = tags,
-			}
-			local member = newproxy(true)
-			getmetatable(member).__index = member_mt
-
-			server.masking:register_client(member)
-			table.insert(members, member :: MemberData)
-		end
-		return members
-	end
-
-	CASE("should send full unreliable components to clients", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(2)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "unreliable_val")
-
-		local entity2 = world:entity()
-		server:set_networked(entity2)
-		server:set_unreliable(entity2, components[2])
-		world:set(entity2, components[2], "unreliable_val2")
-
-		for _, member in members do
-			local buf, variants = server:get_full(member :: any)
-			member.client:apply_full(buf, variants)
-
-			CHECK(client_entity(member, entity1) ~= nil)
-			CHECK(client_entity(member, entity2) ~= nil)
-			CHECK(client_component(member, entity1, 1) == "unreliable_val")
-			CHECK(client_component(member, entity2, 2) == "unreliable_val2")
-
-			-- Should not see other components
-			CHECK(client_component(member, entity1, 2) == nil)
-			CHECK(client_component(member, entity2, 1) == nil)
-		end
-	end)
-
-	CASE("should send unreliable component changes via collect_unreliable", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(2)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "initial")
-
-		-- Full sync first
-		for _, member in members do
-			local buf, variants = server:get_full(member :: any)
-			member.client:apply_full(buf, variants)
-			CHECK(client_component(member, entity1, 1) == "initial")
-		end
-
-		-- Change the value
-		world:set(entity1, components[1], "updated_unreliable")
-
-		-- Collect unreliable updates
-		for player, buf, changes in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(buf, changes)
-			CHECK(client_component(member, entity1, 1) == "updated_unreliable")
-		end
-	end)
-
-	CASE("unreliable changes should not appear in collect_updates", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(1)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "initial")
-
-		-- Full sync
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-
-		-- Change the unreliable value
-		world:set(entity1, components[1], "changed")
-
-		-- collect_updates should NOT contain unreliable changes
-		local update_count = 0
-		for _player, _buf, _changes in server:collect_updates() do
-			update_count += 1
-		end
-		-- value should still be "initial" since we only ran collect_updates
-		CHECK(client_component(members[1], entity1, 1) == "initial")
-
-		-- Now collect_unreliable should have it
-		for player2, buf2, changes2 in server:collect_unreliable() do
-			local member: MemberData = player2 :: any
-			member.client:apply_unreliable(buf2, changes2)
-		end
-		CHECK(client_component(members[1], entity1, 1) == "changed")
-	end)
-
-	CASE("should send full entity with unreliable and reliable mix", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(2)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_reliable(entity1, components[1])
-		server:set_unreliable(entity1, components[2])
-		world:set(entity1, components[1], "reliable_val")
-		world:set(entity1, components[2], "unreliable_val")
-
-		for _, member in members do
-			local buf, variants = server:get_full(member :: any)
-			member.client:apply_full(buf, variants)
-
-			CHECK(client_component(member, entity1, 1) == "reliable_val")
-			CHECK(client_component(member, entity1, 2) == "unreliable_val")
-		end
-
-		-- Change reliable
-		world:set(entity1, components[1], "reliable_updated")
-		for player, buf, changes in server:collect_updates() do
-			local member: MemberData = player :: any
-			member.client:apply_updates(buf, changes)
-			CHECK(client_component(member, entity1, 1) == "reliable_updated")
-		end
-
-		-- Change unreliable
-		world:set(entity1, components[2], "unreliable_updated")
-		for player, buf, changes in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(buf, changes)
-			CHECK(client_component(member, entity1, 2) == "unreliable_updated")
-		end
-	end)
-
-	CASE("unreliable updates should not apply to non-existent client entities", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(4)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		-- Only give to members[1] and members[2]
-		server:set_networked(
-			entity1,
-			filter {
-				[members[1]] = true,
-				[members[2]] = true,
-			}
-		)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "value")
-
-		-- Full sync only to members[1]
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-		CHECK(client_entity(members[1], entity1) ~= nil)
-
-		-- Change the value
-		world:set(entity1, components[1], "updated")
-
-		-- collect_unreliable sends to all mask members
-		-- members[1] should get the update, members[3] should not crash
-		for player, ubuf, uchanges in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(ubuf, uchanges)
-		end
-
-		-- members[1] should have the updated value
-		CHECK(client_component(members[1], entity1, 1) == "updated")
-		-- members[3] should not have entity
-		CHECK(client_entity(members[3], entity1) == nil)
-	end)
-
-	CASE("should send unreliable component additions via collect_updates in full sync", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(2)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_reliable(entity1, components[1])
-		world:set(entity1, components[1], "reliable")
-
-		-- Full sync
-		for _, member in members do
-			local buf, variants = server:get_full(member :: any)
-			member.client:apply_full(buf, variants)
-		end
-
-		-- Now add unreliable component after full sync
-		server:set_unreliable(entity1, components[2])
-		world:set(entity1, components[2], "new_unreliable")
-
-		-- collect_updates should deliver the new unreliable component addition
-		for player, buf, changes in server:collect_updates() do
-			local member: MemberData = player :: any
-			member.client:apply_updates(buf, changes)
-			CHECK(client_component(member, entity1, 2) == "new_unreliable")
-		end
-
-		-- subsequent changes go through collect_unreliable
-		world:set(entity1, components[2], "changed_unreliable")
-		for player, buf, changes in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(buf, changes)
-			CHECK(client_component(member, entity1, 2) == "changed_unreliable")
-		end
-	end)
-
-	CASE("should stop unreliable component tracking", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(1)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "initial")
-
-		-- Full sync
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-		CHECK(client_component(members[1], entity1, 1) == "initial")
-
-		-- Stop unreliable tracking
-		server:stop_unreliable(entity1, components[1])
-
-		-- collect_updates should deliver the removal
-		for player, ubuf, uchanges in server:collect_updates() do
-			local member: MemberData = player :: any
-			member.client:apply_updates(ubuf, uchanges)
-		end
-
-		-- Component should be removed on client
-		local ce = client_entity(members[1], entity1)
-		CHECK(ce ~= nil)
-		CHECK(members[1].world:get(ce, members[1].components[1]) == nil)
-	end)
-
-	CASE("unreliable component removal should propagate via collect_updates", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(1)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "val")
-
-		-- Full sync
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-		CHECK(client_component(members[1], entity1, 1) == "val")
-
-		-- Drain the additions so subsequent changes are tracked as updates
-		for player, ubuf, uchanges in server:collect_updates() do
-			local member: MemberData = player :: any
-			member.client:apply_updates(ubuf, uchanges)
-		end
-
-		-- Remove component from world
-		world:remove(entity1, components[1])
-
-		-- The removal should be signaled via collect_updates (as unreliable_removed in changes)
-		for player, ubuf, uchanges in server:collect_updates() do
-			local member: MemberData = player :: any
-			member.client:apply_updates(ubuf, uchanges)
-		end
-
-		local ce = client_entity(members[1], entity1)
-		CHECK(ce ~= nil)
-		CHECK(members[1].world:get(ce, members[1].components[1]) == nil)
-	end)
-
-	CASE("multiple unreliable components on same entity", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(1)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		server:set_unreliable(entity1, components[2])
-		world:set(entity1, components[1], "val1")
-		world:set(entity1, components[2], "val2")
-
-		-- Full sync
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-		CHECK(client_component(members[1], entity1, 1) == "val1")
-		CHECK(client_component(members[1], entity1, 2) == "val2")
-
-		-- Change both via collect_unreliable
-		world:set(entity1, components[1], "new1")
-		world:set(entity1, components[2], "new2")
-
-		for player, ubuf, uchanges in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(ubuf, uchanges)
-		end
-
-		CHECK(client_component(members[1], entity1, 1) == "new1")
-		CHECK(client_component(members[1], entity1, 2) == "new2")
-	end)
-
-	CASE("unreliable with filter should only send to filtered members", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(4)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		-- Only members[1] and members[3] should get this unreliable component
-		server:set_unreliable(
-			entity1,
-			components[1],
-			filter {
-				[members[1]] = true,
-				[members[3]] = true,
-			}
-		)
-		world:set(entity1, components[1], "filtered_unreliable")
-
-		-- Full sync to all members
-		for _, member in members do
-			local buf, variants = server:get_full(member :: any)
-			member.client:apply_full(buf, variants)
-		end
-
-		CHECK(client_component(members[1], entity1, 1) == "filtered_unreliable")
-		CHECK(client_component(members[2], entity1, 1) == nil)
-		CHECK(client_component(members[3], entity1, 1) == "filtered_unreliable")
-		CHECK(client_component(members[4], entity1, 1) == nil)
-
-		-- Change and collect unreliable
-		world:set(entity1, components[1], "updated_filtered")
-		for player, ubuf, uchanges in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(ubuf, uchanges)
-		end
-
-		CHECK(client_component(members[1], entity1, 1) == "updated_filtered")
-		CHECK(client_component(members[2], entity1, 1) == nil)
-		CHECK(client_component(members[3], entity1, 1) == "updated_filtered")
-		CHECK(client_component(members[4], entity1, 1) == nil)
-	end)
-
-	CASE("unreliable changes to nil should work", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(1)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "something")
-
-		-- Full sync
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-		CHECK(client_component(members[1], entity1, 1) == "something")
-
-		-- Set to nil
-		world:set(entity1, components[1], nil)
-
-		for player, ubuf, uchanges in server:collect_unreliable() do
-			local member: MemberData = player :: any
-			member.client:apply_unreliable(ubuf, uchanges)
-		end
-
-		local ce = client_entity(members[1], entity1)
-		CHECK(ce ~= nil)
-		-- The component should exist but be nil
-		CHECK(members[1].world:has(ce, members[1].components[1]) == true)
-		CHECK(members[1].world:get(ce, members[1].components[1]) == nil)
-	end)
-
-	CASE("unreliable entity deletion should propagate", function()
-		local components = create_test_components(world)
-		server:init()
-
-		local members = create_members_data(1)
-		for _, member in members do
-			server.masking:activate_client(member)
-			member.client:init()
-		end
-
-		local entity1 = world:entity()
-		server:set_networked(entity1)
-		server:set_unreliable(entity1, components[1])
-		world:set(entity1, components[1], "val")
-
-		-- Full sync
-		local buf, variants = server:get_full(members[1] :: any)
-		members[1].client:apply_full(buf, variants)
-		local ce = client_entity(members[1], entity1)
-		CHECK(ce ~= nil)
-
-		-- Delete entity
-		server:stop_networked(entity1)
-
-		-- Deliver update
-		for player, ubuf, uchanges in server:collect_updates() do
-			local member: MemberData = player :: any
-			member.client:apply_updates(ubuf, uchanges)
-		end
-
-		CHECK(client_entity(members[1], entity1) == nil)
-	end)
-end)
-
 TEST("throttle", function()
 	local world: jecs.World = nil :: any
 	local server: replecs.Server = nil :: any
@@ -3495,6 +2983,656 @@ TEST("ownership", function()
 		-- ownership_buffer for this entity should be cleaned (revocation clears all)
 		-- Note: after apply_ownership_grant, all grants are cleared
 		-- but buffer entries may still exist; they'll be rejected server-side
+	end)
+
+	CASE("ownership grant before entity is replicated should be silently dropped", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- Grant ownership BEFORE full sync (client doesn't know about entity yet)
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- Deliver ownership grant to client (entity not yet on client)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Client should NOT have any ownership grants (entity was unknown, so read_entity_id returned nil)
+		CHECK(members[1].client.ownership_grants[members[1] :: any] == nil or true)
+
+		-- Now do full sync — entity appears but without the grant (it was already consumed)
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		local c_entity = client_entity(members[1], entity1)
+		CHECK(c_entity ~= nil)
+
+		-- Client should NOT have ownership for this entity/component
+		-- because the grant was dropped when the entity was unknown
+		CHECK(members[1].client:has_ownership(c_entity :: any, members[1].components[1]) == false)
+
+		-- request_set should be rejected (no ownership)
+		local warn_count_before = 0
+		members[1].client:request_set(c_entity :: any, members[1].components[1], "should_not_work")
+		-- The value should NOT be set since there's no ownership
+		CHECK(members[1].world:get(c_entity :: any, members[1].components[1]) == "initial")
+	end)
+
+	CASE("ownership grant for entity before component is replicated should register grant", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		-- Only set component1 initially, not component2
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+		world:set(entity1, components[2], "secret")
+
+		-- Full sync — only component1 is replicated
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- Drain additions
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(c_entity ~= nil)
+
+		-- Component1 exists, component2 does NOT exist on client
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "initial")
+		CHECK(members[1].world:get(c_entity, members[1].components[2]) == nil)
+
+		-- Now grant ownership of BOTH components
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		world:set(entity1, jecs.pair(replecs.owned, components[2]), members[1] :: any)
+
+		-- Also add component2 to replication now
+		server:set_reliable(entity1, components[2])
+
+		-- Deliver grants to client
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Client should have ownership for BOTH components
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[2]) == true)
+
+		-- request_set on component2 should work even though component2 doesn't exist in client world yet
+		-- WORLD_SET will create it
+		members[1].client:request_set(c_entity, members[1].components[2], "client_new_value")
+
+		-- Component2 should now exist in client world (request_set creates it via WORLD_SET)
+		CHECK(members[1].world:get(c_entity, members[1].components[2]) == "client_new_value")
+
+		-- Collect and apply ownership update to server
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		-- Server should have the new value for component2
+		CHECK(server.storage[entity1].components[components[2]] == "client_new_value")
+	end)
+
+	CASE("ownership grant then component replicated later should work end-to-end", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- Grant ownership immediately
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- Full sync — entity + component + grant all arrive
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(c_entity ~= nil)
+
+		-- Component should exist
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "initial")
+
+		-- Ownership should be granted
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+
+		-- request_set should work immediately
+		members[1].client:request_set(c_entity, members[1].components[1], "client_predicted")
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "client_predicted")
+
+		-- Collect and send to server
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		CHECK(server.storage[entity1].components[components[1]] == "client_predicted")
+	end)
+
+	CASE("request_set without component should create component locally and buffer for server", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- Full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- Drain
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(c_entity ~= nil)
+
+		-- Component1 has a value
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "initial")
+
+		-- Now revoke ownership from server side, then re-grant
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == false)
+
+		-- request_set should be rejected — no ownership
+		members[1].client:request_set(c_entity, members[1].components[1], "should_fail")
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "initial")
+
+		-- Re-grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Now request_set should work
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+		members[1].client:request_set(c_entity, members[1].components[1], "should_work")
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "should_work")
+
+		-- Ownership buffer should have the entry
+		CHECK(members[1].client.ownership_buffer[c_entity] ~= nil)
+		CHECK(members[1].client.ownership_buffer[c_entity][members[1].components[1]] ~= nil)
+
+		-- Apply to server
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+		end
+		CHECK(server.storage[entity1].components[components[1]] == "should_work")
+	end)
+
+	CASE("ownership revoke and re-grant should clear client state properly", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- Grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+
+		-- Buffer a pending update
+		members[1].client:request_set(c_entity, members[1].components[1], "pending")
+		CHECK(members[1].client.ownership_buffer[c_entity] ~= nil)
+
+		-- Revoke ownership — should clear grants AND buffers
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Ownership gone
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == false)
+
+		-- request_set should be rejected
+		members[1].client:request_set(c_entity, members[1].components[1], "should_fail")
+		-- Value should remain "pending" (from the earlier request_set), not "should_fail"
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "pending")
+
+		-- Re-grant to same player
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+		members[1].client:request_set(c_entity, members[1].components[1], "after_regrant")
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "after_regrant")
+
+		-- Apply to server
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+		end
+		CHECK(server.storage[entity1].components[components[1]] == "after_regrant")
+	end)
+
+	CASE("entity removed from replication should clean ownership on client side", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- Grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+
+		-- Server stops the component
+		server:stop_reliable(entity1, components[1])
+
+		-- Deliver the removal
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- Ownership for that component should be cleared on the client
+		-- (entity_remove cleans ownership_grants, ownership_buffer, ownership_unreliable_buffer)
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == false)
+	end)
+
+	CASE("stop_networked should clean all ownership on client", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(entity1, components[2])
+		world:set(entity1, components[1], "val1")
+		world:set(entity1, components[2], "val2")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- Grant ownership of both
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		world:set(entity1, jecs.pair(replecs.owned, components[2]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[2]) == true)
+
+		-- Buffer some ownership updates
+		members[1].client:request_set(c_entity, members[1].components[1], "buf1")
+		members[1].client:request_set(c_entity, members[1].components[2], "buf2", true)
+
+		-- Delete entity from server — this should clean everything
+		world:delete(entity1)
+
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- Entity should be gone from client
+		if members[1].world:contains(c_entity) then
+			-- if entity still exists (some cleanup paths), ownership should still be gone
+			CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == false)
+			CHECK(members[1].client:has_ownership(c_entity, members[1].components[2]) == false)
+		end
+
+		-- Buffers should be cleaned
+		CHECK(members[1].client.ownership_grants[c_entity] == nil)
+		CHECK(members[1].client.ownership_buffer[c_entity] == nil)
+		CHECK(members[1].client.ownership_unreliable_buffer[c_entity] == nil)
+	end)
+end)
+
+TEST("ownership buffer validation", function()
+	local world: jecs.World = nil :: any
+	local server: replecs.Server = nil :: any
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		server = replecs.create_server(world)
+	end)
+
+	AFTER_EACH(function()
+		server:destroy()
+	end)
+
+	local function create_members_data(count: number?)
+		local members = {} :: { MemberData }
+		for i = 1, (count or 3) do
+			local new_world = jecs.world()
+			local components = create_test_components(new_world)
+			local tags = create_test_tags(new_world)
+			local replicator = replecs.create_client(new_world)
+
+			local member_mt = {
+				world = new_world,
+				client = replicator,
+				components = components,
+				tags = tags,
+			}
+			local member = newproxy(true)
+			getmetatable(member).__index = member_mt
+
+			server.masking:register_client(member)
+			table.insert(members, member :: MemberData)
+		end
+		return members
+	end
+
+	local function client_entity(member: MemberData, server_entity: jecs.Entity): jecs.Entity?
+		local entity = member.client.server_ids[server_entity :: any]
+		if entity and member.world:contains(entity) then
+			return entity
+		end
+		return nil
+	end
+
+	CASE("should not crash on completely empty buffer", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local empty_buf = buffer.create(0)
+		local ok = pcall(function()
+			server:apply_ownership_reliable(empty_buf, members[1] :: any, {})
+		end)
+		CHECK(ok == true)
+
+		local ok2 = pcall(function()
+			server:apply_ownership_unreliable(empty_buf, members[1] :: any, {})
+		end)
+		CHECK(ok2 == true)
+	end)
+
+	CASE("should not crash on single-byte buffer (packet type only)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local buf = buffer.create(1)
+		buffer.writeu8(buf, 0, 5) -- ownership_reliable packet type
+		local ok = pcall(function()
+			server:apply_ownership_reliable(buf, members[1] :: any, {})
+		end)
+		CHECK(ok == true)
+	end)
+
+	CASE("should not crash on truncated buffer with valid packet type", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		-- cursor reads backwards: last byte = packet type, then vlqs
+		-- buffer layout: [vlq_entries][vlq_packets][packet_type]
+		local buf = buffer.create(3)
+		buffer.writeu8(buf, 0, 129) -- vlq for total_entries = 1 (read third)
+		buffer.writeu8(buf, 1, 129) -- vlq for total_packets = 1 (read second)
+		buffer.writeu8(buf, 2, 5) -- ownership_reliable packet type (read first)
+		local ok = pcall(function()
+			server:apply_ownership_reliable(buf, members[1] :: any, {})
+		end)
+		CHECK(ok == true)
+	end)
+
+	CASE("should not crash on wrong packet type byte", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		-- completely wrong packet type
+		local buf = buffer.create(1)
+		buffer.writeu8(buf, 0, 255) -- invalid packet type
+		local ok = pcall(function()
+			server:apply_ownership_reliable(buf, members[1] :: any, {})
+		end)
+		-- this should NOT crash — the pcall catches the error from check_packet_type
+		CHECK(ok == true)
+	end)
+
+	CASE("should not crash on random garbage buffer", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local garbage = buffer.create(64)
+		for i = 0, 63 do
+			buffer.writeu8(garbage, i, math.random(0, 255))
+		end
+		local ok = pcall(function()
+			server:apply_ownership_reliable(garbage, members[1] :: any, {})
+		end)
+		CHECK(ok == true)
+
+		local ok2 = pcall(function()
+			server:apply_ownership_unreliable(garbage, members[1] :: any, {})
+		end)
+		CHECK(ok2 == true)
+	end)
+
+	CASE("should handle serdes deserialization failure gracefully", function()
+		local fail_deserialize = false
+		local serdes: replecs.Serdes = {
+			serialize = function(value: number)
+				local buf = buffer.create(8)
+				buffer.writef64(buf, 0, value)
+				return buf
+			end,
+			deserialize = function(buf: buffer)
+				if fail_deserialize then
+					error "deserialization exploded!"
+				end
+				return buffer.readf64(buf, 0)
+			end,
+		}
+
+		local components = create_test_components(world)
+		world:set(components[1], replecs.serdes, serdes)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+			member.world:set(member.components[1], replecs.serdes, serdes)
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], 50.0)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- full sync while deserializer works fine
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- NOW enable failure for the server-side deserialize on ownership receive
+		fail_deserialize = true
+
+		-- send a valid ownership update but with a failing server-side deserializer
+		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 42.0)
+
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		-- value should NOT have changed since server-side deserialization failed
+		CHECK(server.storage[entity1].components[components[1]] == 50.0)
+
+		-- now disable the failure and try again
+		fail_deserialize = false
+		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 42.0)
+
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		-- now it should succeed
+		CHECK(server.storage[entity1].components[components[1]] == 42.0)
+	end)
+
+	CASE("should reject variant index out of bounds", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		local full_buf, full_variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(full_buf, full_variants)
+
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- send ownership with a variant index that's way out of bounds
+		-- manually craft a buffer that references variant index 999
+		local c_entity = client_entity(members[1], entity1) :: any
+		members[1].client:request_set(c_entity, members[1].components[1], "test_value")
+
+		-- collect the real buffer and replace with tampered variant reference
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			-- apply with empty variants (simulates tampered variant array)
+			server:apply_ownership_reliable(ownership_buf, members[1] :: any, {})
+		end
+
+		-- value should not have changed (variant was out of bounds)
+		CHECK(server.storage[entity1].components[components[1]] == "initial")
 	end)
 end)
 

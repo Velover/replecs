@@ -1997,125 +1997,174 @@ function server_replicator.collect_ownership_grant(server: Server)
 	return iterator :: PacketIterator
 end
 
+local function skip_serdes_value(c: Cursor, serdes: types.Serdes?)
+	if serdes then
+		local bytespan = serdes.bytespan or cursor.read_vlq(c)
+		cursor.read_buffer(c, bytespan)
+		if serdes.includes_variants then
+			local start_variant = cursor.read_vlq(c)
+			if start_variant > 0 then
+				cursor.read_vlq(c) -- skip size
+			end
+		end
+	else
+		cursor.read_vlq(c)
+	end
+end
+
+local function read_serdes_value(
+	server: Server,
+	c: Cursor,
+	component: Component,
+	serdes: types.Serdes?,
+	variants: { any }?
+): (boolean, any?)
+	if serdes then
+		local bytespan = serdes.bytespan or cursor.read_vlq(c)
+		if bytespan < 0 then
+			common.log_warn(
+				`ownership: negative bytespan ({bytespan}) for component {common.log_component(server.world, component)}`
+			)
+			return false, nil
+		end
+		local appended = cursor.read_buffer(c, bytespan)
+		local serdes_variants: { any }? = nil
+
+		if serdes.includes_variants then
+			local start_variant = cursor.read_vlq(c)
+			if start_variant > 0 then
+				local size = cursor.read_vlq(c)
+				if variants and start_variant + size - 1 > #variants then
+					common.log_warn(
+						`ownership: variant range out of bounds for component {common.log_component(server.world, component)}`
+					)
+					return false, nil
+				end
+				serdes_variants = if variants
+					then table.move(variants, start_variant, start_variant + size - 1, 1, {})
+					else {}
+			end
+		end
+
+		local ok, value = pcall(serdes.deserialize :: any, appended, serdes_variants :: any)
+		if not ok then
+			common.log_warn(
+				`ownership: deserialization failed for component {common.log_component(server.world, component)}: {value}`
+			)
+			return false, nil
+		end
+
+		if serdes.ownership_validate then
+			if not serdes.ownership_validate(value) then
+				common.log_warn(`ownership validation failed for component {common.log_component(server.world, component)}`)
+				return false, nil
+			end
+		end
+
+		return true, value
+	else
+		local variant_id = cursor.read_vlq(c)
+		if variant_id == 0 then
+			return true, nil
+		end
+		if not variants or variant_id > #variants or variant_id < 0 then
+			common.log_warn(
+				`ownership: variant index {variant_id} out of bounds for component {common.log_component(
+					server.world,
+					component
+				)}`
+			)
+			return false, nil
+		end
+		return true, variants[variant_id]
+	end
+end
+
+local function validate_ownership_entry(server: Server, player: Player, entity: Entity, component: Component): boolean
+	local entity_ownership = server.ownership[entity]
+	if not entity_ownership then
+		return false
+	end
+
+	local entry = entity_ownership[component]
+	if not entry or entry.player ~= player then
+		return false
+	end
+
+	return true
+end
+
+local function safe_apply_ownership(
+	server: Server,
+	buf: buffer,
+	player: Player,
+	all_variants: { { any } }?,
+	expected_packet_type: number,
+	is_unreliable: boolean
+)
+	local ok, err = pcall(function()
+		local c = cursor.from(buf)
+		check_packet_type(c, expected_packet_type)
+		local total_packets = cursor.read_vlq(c)
+		local variant_start = (all_variants and #all_variants + 1) :: number
+
+		for a = 1, total_packets do
+			local variants = all_variants and all_variants[variant_start - a]
+			local total_entries = cursor.read_vlq(c)
+
+			for _ = 1, total_entries do
+				local entity, _server_id, _id_type = server_replicator.read_entity_id(server, c)
+
+				if not entity then
+					-- entity doesn't exist on server or is a shared/custom entity — skip value
+					-- we still need to read component_id and value to advance the cursor
+					local component = server_replicator.read_component_id(server, c)
+					local serdes = server.component_serdes[component] or server.shared.serdes[component]
+					skip_serdes_value(c, serdes)
+					continue
+				end
+
+				local component = server_replicator.read_component_id(server, c)
+
+				-- verify ownership
+				if not validate_ownership_entry(server, player, entity, component) then
+					local serdes = server.component_serdes[component] or server.shared.serdes[component]
+					skip_serdes_value(c, serdes)
+					continue
+				end
+
+				-- deserialize + validate the value
+				local serdes = server.component_serdes[component] or server.shared.serdes[component]
+				local success, value = read_serdes_value(server, c, component, serdes, variants)
+				if not success then
+					continue
+				end
+
+				-- apply the value (buffered if throttled)
+				buffer_or_allocate_component_change(server, entity, component, value, false, true)
+
+				if is_unreliable then
+					-- mark as unreliable update for replication to other clients
+					if not server.additions[entity] and server.track_info.networked[entity] then
+						server.masking:allocate_unreliable_addition(entity, component)
+					end
+				end
+			end
+		end
+	end)
+
+	if not ok then
+		common.log_warn(`ownership: malformed buffer from player, packet dropped: {err}`)
+	end
+end
+
 function server_replicator.apply_ownership_reliable(
 	server: Server,
 	buf: buffer,
 	player: Player,
 	all_variants: { { any } }?
 )
-	local c = cursor.from(buf)
-	check_packet_type(c, PACKET_TYPES.ownership_reliable)
-	local total_packets = cursor.read_vlq(c)
-	local variant_start = (all_variants and #all_variants + 1) :: number
-
-	for a = 1, total_packets do
-		local variants = all_variants and all_variants[variant_start - a]
-		local total_entries = cursor.read_vlq(c)
-
-		for _ = 1, total_entries do
-			local entity, _server_id, _id_type = server_replicator.read_entity_id(server, c)
-			local component = server_replicator.read_component_id(server, c)
-
-			if not entity then
-				-- entity doesn't exist on server, skip
-				-- read the value to advance cursor (deserialize + skip)
-				local serdes = server.component_serdes[component] or server.shared.serdes[component]
-				if serdes then
-					local bytespan = serdes.bytespan or cursor.read_vlq(c)
-					cursor.read_buffer(c, bytespan)
-					if serdes.includes_variants then
-						local start_variant = cursor.read_vlq(c)
-						if start_variant > 0 then
-							cursor.read_vlq(c) -- skip size
-						end
-					end
-				else
-					cursor.read_vlq(c)
-				end
-				continue
-			end
-
-			-- verify ownership
-			local entity_ownership = server.ownership[entity]
-			if not entity_ownership then
-				-- no ownership, skip value
-				local serdes = server.component_serdes[component] or server.shared.serdes[component]
-				if serdes then
-					local bytespan = serdes.bytespan or cursor.read_vlq(c)
-					cursor.read_buffer(c, bytespan)
-					if serdes.includes_variants then
-						local start_variant = cursor.read_vlq(c)
-						if start_variant > 0 then
-							cursor.read_vlq(c)
-						end
-					end
-				else
-					cursor.read_vlq(c)
-				end
-				continue
-			end
-
-			local entry = entity_ownership[component]
-			if not entry or entry.player ~= player then
-				-- not owned by this player, skip value
-				local serdes = server.component_serdes[component] or server.shared.serdes[component]
-				if serdes then
-					local bytespan = serdes.bytespan or cursor.read_vlq(c)
-					cursor.read_buffer(c, bytespan)
-					if serdes.includes_variants then
-						local start_variant = cursor.read_vlq(c)
-						if start_variant > 0 then
-							cursor.read_vlq(c)
-						end
-					end
-				else
-					cursor.read_vlq(c)
-				end
-				continue
-			end
-
-			-- deserialize the value
-			local serdes = server.component_serdes[component] or server.shared.serdes[component]
-			local value: any
-			if serdes then
-				local bytespan = serdes.bytespan or cursor.read_vlq(c)
-				local appended = cursor.read_buffer(c, bytespan)
-				local serdes_variants: { any }? = nil
-
-				if serdes.includes_variants then
-					local start_variant = cursor.read_vlq(c)
-					if start_variant > 0 then
-						local size = cursor.read_vlq(c)
-						serdes_variants = if variants
-							then table.move(variants, start_variant, start_variant + size - 1, 1, {})
-							else {}
-					end
-				end
-
-				value = (serdes :: any).deserialize(appended, serdes_variants :: any)
-
-				-- validate ownership value
-				if serdes.ownership_validate then
-					if not serdes.ownership_validate(value) then
-						common.log_warn(
-							`ownership validation failed for component {common.log_component(server.world, component)}`
-						)
-						continue
-					end
-				end
-			else
-				local variant_id = cursor.read_vlq(c)
-				if variant_id == 0 then
-					value = nil
-				else
-					value = if variants then variants[variant_id] else nil
-				end
-			end
-
-			-- apply the value (buffered if throttled)
-			buffer_or_allocate_component_change(server, entity, component, value, false, true)
-		end
-	end
+	safe_apply_ownership(server, buf, player, all_variants, PACKET_TYPES.ownership_reliable, false)
 end
 
 function server_replicator.apply_ownership_unreliable(
@@ -2124,121 +2173,7 @@ function server_replicator.apply_ownership_unreliable(
 	player: Player,
 	all_variants: { { any } }?
 )
-	local c = cursor.from(buf)
-	check_packet_type(c, PACKET_TYPES.ownership_unreliable)
-	local total_packets = cursor.read_vlq(c)
-	local variant_start = (all_variants and #all_variants + 1) :: number
-
-	for a = 1, total_packets do
-		local variants = all_variants and all_variants[variant_start - a]
-		local total_entries = cursor.read_vlq(c)
-
-		for _ = 1, total_entries do
-			local entity, _server_id, _id_type = server_replicator.read_entity_id(server, c)
-			local component = server_replicator.read_component_id(server, c)
-
-			if not entity then
-				local serdes = server.component_serdes[component] or server.shared.serdes[component]
-				if serdes then
-					local bytespan = serdes.bytespan or cursor.read_vlq(c)
-					cursor.read_buffer(c, bytespan)
-					if serdes.includes_variants then
-						local start_variant = cursor.read_vlq(c)
-						if start_variant > 0 then
-							cursor.read_vlq(c)
-						end
-					end
-				else
-					cursor.read_vlq(c)
-				end
-				continue
-			end
-
-			-- verify ownership
-			local entity_ownership = server.ownership[entity]
-			if not entity_ownership then
-				local serdes = server.component_serdes[component] or server.shared.serdes[component]
-				if serdes then
-					local bytespan = serdes.bytespan or cursor.read_vlq(c)
-					cursor.read_buffer(c, bytespan)
-					if serdes.includes_variants then
-						local start_variant = cursor.read_vlq(c)
-						if start_variant > 0 then
-							cursor.read_vlq(c)
-						end
-					end
-				else
-					cursor.read_vlq(c)
-				end
-				continue
-			end
-
-			local entry = entity_ownership[component]
-			if not entry or entry.player ~= player then
-				-- not owned by this player, skip value
-				local serdes = server.component_serdes[component] or server.shared.serdes[component]
-				if serdes then
-					local bytespan = serdes.bytespan or cursor.read_vlq(c)
-					cursor.read_buffer(c, bytespan)
-					if serdes.includes_variants then
-						local start_variant = cursor.read_vlq(c)
-						if start_variant > 0 then
-							cursor.read_vlq(c)
-						end
-					end
-				else
-					cursor.read_vlq(c)
-				end
-				continue
-			end
-
-			-- deserialize the value
-			local serdes = server.component_serdes[component] or server.shared.serdes[component]
-			local value: any
-			if serdes then
-				local bytespan = serdes.bytespan or cursor.read_vlq(c)
-				local appended = cursor.read_buffer(c, bytespan)
-				local serdes_variants: { any }? = nil
-
-				if serdes.includes_variants then
-					local start_variant = cursor.read_vlq(c)
-					if start_variant > 0 then
-						local size = cursor.read_vlq(c)
-						serdes_variants = if variants
-							then table.move(variants, start_variant, start_variant + size - 1, 1, {})
-							else {}
-					end
-				end
-
-				value = (serdes :: any).deserialize(appended, serdes_variants :: any)
-
-				if serdes.ownership_validate then
-					if not serdes.ownership_validate(value) then
-						common.log_warn(
-							`ownership validation failed for component {common.log_component(server.world, component)}`
-						)
-						continue
-					end
-				end
-			else
-				local variant_id = cursor.read_vlq(c)
-				if variant_id == 0 then
-					value = nil
-				else
-					value = if variants then variants[variant_id] else nil
-				end
-			end
-
-			-- apply the value (buffered if throttled) — ownership writes to storage regardless of transport
-			-- but we also mark it for unreliable replication to other clients
-			buffer_or_allocate_component_change(server, entity, component, value, false, true)
-
-			-- mark as unreliable update for replication to other clients
-			if not server.additions[entity] and server.track_info.networked[entity] then
-				server.masking:allocate_unreliable_addition(entity, component)
-			end
-		end
-	end
+	safe_apply_ownership(server, buf, player, all_variants, PACKET_TYPES.ownership_unreliable, true)
 end
 
 function server_replicator.start_networked(server: Server, entity: Entity, filter: AnyFilter?)

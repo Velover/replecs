@@ -18,5 +18,6 @@ Packages/
 include
 out
 
+.tgz
 .zed
 dist

@@ -382,7 +382,21 @@ function cursor.write_span(c: Cursor, value: number, span: number)
 	end
 end
 
+function cursor.remaining(c: Cursor): number
+	return c.offset
+end
+
+function cursor.check_read(c: Cursor, bytes: number)
+	if c.offset < bytes then
+		error(`buffer underflow: need {bytes} bytes but only {c.offset} remaining`)
+	end
+end
+
 function cursor.read_buffer(c: Cursor, len: number)
+	if len < 0 then
+		error(`invalid read length: {len}`)
+	end
+	cursor.check_read(c, len)
 	local retrieved = buffer.create(len)
 	buffer.copy(retrieved, 0, c.buffer, c.offset - len, len)
 	c.offset -= len
@@ -390,16 +404,19 @@ function cursor.read_buffer(c: Cursor, len: number)
 end
 
 function cursor.readu8(c: Cursor): number
+	cursor.check_read(c, 1)
 	c.offset -= 1
 	return buffer.readu8(c.buffer, c.offset)
 end
 
 function cursor.readu16(c: Cursor): number
+	cursor.check_read(c, 2)
 	c.offset -= 2
 	return buffer.readu16(c.buffer, c.offset)
 end
 
 function cursor.readu24(c: Cursor): number
+	cursor.check_read(c, 3)
 	c.offset -= 3
 	local one = buffer.readu8(c.buffer, c.offset)
 	local two = buffer.readu16(c.buffer, c.offset + 1)
@@ -407,11 +424,13 @@ function cursor.readu24(c: Cursor): number
 end
 
 function cursor.readu32(c: Cursor): number
+	cursor.check_read(c, 4)
 	c.offset -= 4
 	return buffer.readu32(c.buffer, c.offset)
 end
 
 function cursor.readu40(c: Cursor): number
+	cursor.check_read(c, 5)
 	c.offset -= 5
 	local one = buffer.readu8(c.buffer, c.offset)
 	local two = buffer.readu32(c.buffer, c.offset + 1)
@@ -433,15 +452,18 @@ function cursor.read_span(c: Cursor, span: number): number
 end
 
 function cursor.readi8(c: Cursor): number
+	cursor.check_read(c, 1)
 	c.offset -= 1
 	return buffer.readi8(c.buffer, c.offset)
 end
 
 function cursor.readi16(c: Cursor): number
+	cursor.check_read(c, 2)
 	c.offset -= 2
 	return buffer.readi16(c.buffer, c.offset)
 end
 function cursor.readi32(c: Cursor): number
+	cursor.check_read(c, 4)
 	c.offset -= 4
 	return buffer.readi32(c.buffer, c.offset)
 end
