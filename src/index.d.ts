@@ -89,8 +89,8 @@ declare namespace Replecs {
 
   export interface ClientImp {
     set_serdes<T extends Id>(
-      component: InferComponent<T>,
-      serdes: SerdesTable<T>,
+      component: T,
+      serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
   }
@@ -206,8 +206,8 @@ declare namespace Replecs {
     remove_custom(entity: Entity): void;
 
     set_serdes<T extends Id>(
-      component: InferComponent<T>,
-      serdes: SerdesTable<T>,
+      component: T,
+      serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
   }
@@ -272,8 +272,8 @@ declare namespace Replecs {
     register_custom_id(custom_id: CustomId): void;
 
     set_serdes<T extends Id>(
-      component: InferComponent<T>,
-      serdes: SerdesTable<T>,
+      component: T,
+      serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
   }
