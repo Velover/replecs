@@ -233,8 +233,8 @@ declare namespace Replecs {
     register_custom_id(custom_id: CustomId): void;
 
     set_serdes<T extends Id>(
-      component: InferComponent<T>,
-      serdes: SerdesTable<T>,
+      component: T,
+      serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
   }
