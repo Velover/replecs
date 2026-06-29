@@ -237,6 +237,20 @@ server.apply_ownership(buf, player, variants);
 
 **Mutual exclusion**: The server cannot modify a component that is owned by a client. Ownership must be removed first.
 
+**Important**: `set_owner` must be called **after** setting the component value. Once ownership is granted, the server is blocked from writing to that component:
+
+```ts
+// ✅ Correct order
+server.set_networked(entity);
+server.set_reliable(entity, Position);
+world.set(entity, Position, initialCFrame); // set value first
+server.set_owner(entity, Position, player); // then grant ownership
+
+// ❌ Wrong order — server world:set would be blocked by ownership
+server.set_owner(entity, Position, player);
+world.set(entity, Position, initialCFrame); // silently blocked!
+```
+
 ### Throttle
 
 Rate-limit replication of specific components:
