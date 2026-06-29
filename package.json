@@ -2,12 +2,12 @@
   "name": "@rbxts/replecs",
   "version": "0.3.2",
   "description": "Replication library for Jecs",
-  "main": "out/init.luau",
-  "types": "out/index.d.ts",
+  "main": "dist/out/init.luau",
+  "types": "dist/out/index.d.ts",
   "exports": {
     ".": {
-      "types": "./out/index.d.ts",
-      "default": "./out/init.luau"
+      "types": "./dist/out/index.d.ts",
+      "default": "./dist/out/init.luau"
     }
   },
   "directories": {
@@ -18,12 +18,12 @@
     "access": "public"
   },
   "files": [
-    "out",
+    "dist/out",
     "!**/*.spec.lua",
     "!**/*.spec.d.ts"
   ],
   "scripts": {
-    "build": "rbxtsc --rojo serve-ts.project.json",
+    "build": "lune run .lune/ts-process.luau",
     "serve": "rojo sourcemap serve.project.json -o sourcemap.json --watch && rojo serve serve.project.json"
   },
   "repository": {
