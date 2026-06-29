@@ -2453,8 +2453,8 @@ TEST("ownership", function()
 		server:set_reliable(entity1, components[1])
 		world:set(entity1, components[1], "initial")
 
-		-- grant ownership to member1
-		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		-- grant ownership to member1 via shorthand
+		server:set_owner(entity1, components[1], members[1] :: any)
 
 		-- full sync
 		local buf, variants = server:get_full(members[1] :: any)
@@ -2472,6 +2472,51 @@ TEST("ownership", function()
 		CHECK(c_entity ~= nil)
 		CHECK(grants[c_entity] ~= nil)
 		CHECK(grants[c_entity][members[1].components[1]] == true)
+	end)
+
+	CASE("set_owner shorthand should grant ownership end-to-end", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- use set_owner shorthand
+		server:set_owner(entity1, components[1], members[1] :: any)
+
+		-- verify server ownership state
+		CHECK(server.ownership[entity1] ~= nil)
+		CHECK(server.ownership[entity1][components[1]] ~= nil)
+		CHECK(server.ownership[entity1][components[1]].player == members[1] :: any)
+		CHECK(server.ownership_dirty[members[1] :: any] == true)
+
+		-- deliver grants
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+
+		-- reassign ownership to member2 via shorthand
+		server:set_owner(entity1, components[1], members[2] :: any)
+		CHECK(server.ownership[entity1][components[1]].player == members[2] :: any)
+
+		-- member2 (new owner) should be dirty
+		CHECK(server.ownership_dirty[members[2] :: any] == true)
 	end)
 
 	CASE("should enforce single-owner invariant", function()

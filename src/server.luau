@@ -75,6 +75,7 @@ export type ServerImp = {
 	set_unreliable: (self: Server, entity: Entity, component: Component, filter: AnyFilter?) -> (),
 	set_pair: (self: Server, entity: Entity, id: Component, filter: AnyFilter?) -> (),
 	set_relation: (self: Server, entity: Entity, relation: Component, filter: AnyFilter?) -> (),
+	set_owner: (self: Server, entity: Entity, component: Component, player: Player) -> (),
 
 	stop_networked: (self: Server, entity: Entity, keep: boolean?) -> (),
 	stop_reliable: (self: Server, entity: Entity, component: Component, keep: boolean?) -> (),
@@ -2410,6 +2411,10 @@ function server_replicator.set_relation(server: Server, entity: Entity, relation
 	else
 		server_replicator.start_relation(server, entity, relation, filter)
 	end
+end
+
+function server_replicator.set_owner(server: Server, entity: Entity, component: Component, player: Player)
+	server.world:set(entity, PAIR(server.components.owned, component), player)
 end
 
 function server_replicator.set_custom(server: Server, entity: Entity, handler: Component | CustomId)

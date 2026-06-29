@@ -219,6 +219,7 @@ declare namespace Replecs {
     ): void;
     set_pair(entity: Entity, id: Pair, filter?: MemberFilter): void;
     set_relation(entity: Entity, relation: Entity, filter?: MemberFilter): void;
+    set_owner(entity: Entity, component: Entity, player: Player): void;
 
     stop_networked(entity: Entity, keep?: boolean): void;
     stop_reliable(entity: Entity, component: Entity, keep?: boolean): void;

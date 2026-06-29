@@ -207,7 +207,10 @@ Grant clients authority over specific components:
 ```ts
 import { pair } from "@rbxts/jecs";
 
-// Server: grant ownership
+// Server: grant ownership (shorthand)
+server.set_owner(entity, Position, player);
+
+// Or manually:
 world.set(entity, pair(Replecs.Owned, Position), player);
 
 // Server: send grants
