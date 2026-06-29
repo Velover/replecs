@@ -281,3 +281,9 @@ Returns the total number of shared components.
 | `client.ownership_buffer`            | `Map<Entity, Map<Component, { value: any }>>` | Pending reliable ownership updates                    |
 | `client.ownership_unreliable_buffer` | `Map<Entity, Map<Component, { value: any }>>` | Pending unreliable ownership updates                  |
 | `client.command_buffers`             | `{ [Entity]: CommandBuffer }?`                | Active during replication (hooks see buffered writes) |
+
+---
+
+## Interpolation
+
+See **[Interpolation](interpolation.md)** for the standalone interpolation buffer API (`Replecs.create_interpolation`), which provides jitter-compensating client-side lerping for replicated component values.

@@ -329,6 +329,63 @@ client.hook("deleted", entity, (entity) => {
 
 ---
 
+## Client-Side Interpolation
+
+Smoothly interpolate replicated values with jitter compensation:
+
+```ts
+import Replecs from "@rbxts/replecs-extended";
+import { pair } from "@rbxts/jecs";
+
+const interp = Replecs.create_interpolation({
+  base_delay: 1 / 20, // match reliable replication rate
+  jitter_smoothing: 0.1,
+});
+
+// Register lerp functions
+interp.register(Position, (a: CFrame, b: CFrame, t: number) => a.Lerp(b, t));
+interp.register(Rotation, (a: CFrame, b: CFrame, t: number) => a.Slerp(b, t));
+
+// Feed snapshots from hooks
+client.hook(
+  "changed",
+  pair(Replecs.Reliable, Position),
+  (entity, id, value) => {
+    interp.push(entity, Position, value, os.clock());
+  },
+);
+
+// Clean up on entity deletion
+client.hook("deleted", entity, (entity) => {
+  interp.remove_entity(entity);
+});
+
+// Render system — runs every frame
+function INTERPOLATION_SYSTEM() {
+  for (const [entity] of world.query(Position)) {
+    const pos = interp.get(entity, Position);
+    if (pos !== undefined) {
+      const part = world.get(entity, VisualPart) as BasePart;
+      part.CFrame = pos;
+    }
+  }
+}
+```
+
+For ownership-controlled entities, skip interpolation:
+
+```ts
+function INTERPOLATION_SYSTEM() {
+  for (const [entity] of world.query(Position)) {
+    if (client.has_ownership(entity, Position)) continue;
+    const pos = interp.get(entity, Position);
+    // ...
+  }
+}
+```
+
+---
+
 ## Anti-Patterns
 
 ### ❌ Forgetting `set_networked`

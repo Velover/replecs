@@ -6,6 +6,7 @@ local utils = require "@self/utils"
 local client = require "@self/client"
 local server = require "@self/server"
 local customid = require "@self/customid"
+local interpolation = require "@self/interpolation"
 local VERSION = require "@self/ver"
 
 export type Server = server.Server
@@ -19,6 +20,8 @@ export type HandleContext = customid.HandleContext
 export type CustomId = customid.CustomId
 export type HandshakeInfo = types.HandshakeInfo
 export type Serdes = types.Serdes
+export type InterpolatorConfig = interpolation.InterpolatorConfig
+export type Interpolator = interpolation.Interpolator
 
 export type ReplecsLib = {
 	server: Server,
@@ -40,6 +43,7 @@ type Replecs = types.Components & {
 	create_server: (world: World?) -> Server,
 	create_client: (world: World?) -> Client,
 	create_custom_id: (identifier: string, handler: (ctx: HandleContext) -> Entity?) -> CustomId,
+	create_interpolation: (config: interpolation.InterpolatorConfig?) -> interpolation.Interpolator,
 }
 
 local replecs = {}
@@ -93,6 +97,10 @@ end
 
 function replecs.create_custom_id(identifier: string, handler: (ctx: HandleContext) -> Entity?)
 	return customid.create(identifier, handler)
+end
+
+function replecs.create_interpolation(config: interpolation.InterpolatorConfig?)
+	return interpolation.create(config)
 end
 
 function replecs.after_replication(lib: ReplecsLib, callback: () -> ())

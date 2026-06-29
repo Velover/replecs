@@ -259,6 +259,32 @@ declare namespace Replecs {
     ): LuaTuple<[true]> | LuaTuple<[false, string]>;
   }
 
+  export interface InterpolatorConfig {
+    max_snapshots?: number;
+    base_delay?: number;
+    jitter_smoothing?: number;
+  }
+
+  export interface Interpolator {
+    /** Register a lerp function for a component type. */
+    register<T>(component: Entity<T>, lerp: (a: T, b: T, t: number) => T): void;
+
+    /** Push a new snapshot. Call from a hook/override callback. */
+    push<T>(entity: Entity, component: Entity<T>, value: T, time: number): void;
+
+    /** Get the interpolated value. Returns undefined if no snapshots exist. */
+    get<T>(entity: Entity, component: Entity<T>): T | undefined;
+
+    /** Remove all buffered state for an entity. */
+    remove_entity(entity: Entity): void;
+
+    /** Remove buffered state for a specific component on an entity. */
+    remove_component(entity: Entity, component: Entity): void;
+
+    /** Returns base_delay + current jitter. */
+    get_delay(): number;
+  }
+
   export interface ReplecsLib {
     client: Client;
     server: Server;
@@ -283,6 +309,7 @@ declare namespace Replecs {
       identifier: string,
       handler?: (ctx: HandleContext) => Entity,
     ) => CustomId;
+    create_interpolation: (config?: InterpolatorConfig) => Interpolator;
   }
 }
 

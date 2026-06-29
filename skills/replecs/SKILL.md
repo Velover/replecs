@@ -3,10 +3,11 @@ name: replecs
 description: >
   Expert guidance for ReplecsExtended — a feature-rich, buffer-based ECS replication library for Roblox built on jecs.
   Covers server/client initialization, entity tracking, component replication (reliable/unreliable), player filtering via bitmask masking,
-  custom IDs, serdes, ownership grants, throttling, hooks/overrides, relations, and handshake verification.
+  custom IDs, serdes, ownership grants, throttling, hooks/overrides, relations, handshake verification, and client-side interpolation.
   USE WHEN: writing or debugging code that uses ReplecsExtended; setting up server/client replication pipelines;
   implementing player filtering, ownership, throttle, custom IDs, or serdes for jecs components;
-  understanding how Replecs packet serialization, masking, or entity ID remapping works.
+  understanding how Replecs packet serialization, masking, or entity ID remapping works;
+  implementing jitter-compensating interpolation buffers for lerping replicated values.
   DO NOT USE FOR: general jecs ECS questions unrelated to replication; networking layer implementation (e.g. Zap/Remotes).
 ---
 
@@ -25,6 +26,7 @@ ReplecsExtended is a fast, buffer-based ECS replication library for Roblox built
 - **Throttle** — rate-limiting replication of specific components
 - **Relations** — replicating jecs relationships and pair values
 - **Handshake** — server/client shared state verification
+- **Interpolation** — jitter-compensating snapshot buffer for smooth client-side lerping
 
 ## Architecture
 
@@ -47,6 +49,7 @@ ReplecsExtended is a fast, buffer-based ECS replication library for Roblox built
    │ • throttle  │          │ • ownership │
    │ • ownership │          │ • command   │
    └─────────────┘          │   buffers   │
+                            │ • interp    │
                             └─────────────┘
 ```
 
@@ -349,6 +352,31 @@ if (!ok) {
 }
 ```
 
+## Interpolation (Client-Side)
+
+For smooth client-side lerping with jitter compensation, ReplecsExtended provides a standalone interpolation buffer:
+
+```ts
+const interp = Replecs.create_interpolation({ base_delay: 0.05 });
+
+// Register lerp functions
+interp.register(Position, (a, b, t) => a.Lerp(b, t));
+
+// Feed from hooks
+client.hook(
+  "changed",
+  pair(Replecs.Reliable, Position),
+  (entity, id, value) => {
+    interp.push(entity, Position, value, os.clock());
+  },
+);
+
+// Read each frame
+const pos = interp.get(entity, Position);
+```
+
+See **[Interpolation](references/interpolation.md)** for the full API, jitter compensation details, and patterns.
+
 ## Reference Files
 
 - **[Server API](references/server-api.md)** — Complete server-side API reference
@@ -356,4 +384,5 @@ if (!ok) {
 - **[Components](references/components.md)** — Component types, pairs, and the `Components` table
 - **[Ownership](references/ownership.md)** — Ownership system deep-dive
 - **[Masking & Filtering](references/masking-filtering.md)** — Bitmask masking, player filtering, compact_members
+- **[Interpolation](references/interpolation.md)** — Jitter-compensating interpolation buffer API
 - **[Patterns](references/patterns.md)** — Common patterns, anti-patterns, and integration examples
