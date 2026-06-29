@@ -188,6 +188,9 @@ import { pair } from "@rbxts/jecs";
 const Score = world.component<number>();
 world.set(Score, pair(Replecs.Throttle, Score), 1 / 20);
 
+// Shorthand (equivalent)
+server.set_throttle(Score, 1 / 20);
+
 // Normal server code — changes are buffered automatically
 world.set(playerEntity, Score, newScore);
 

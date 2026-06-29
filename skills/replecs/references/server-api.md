@@ -54,11 +54,18 @@ server.set_unreliable(entity, Velocity, filter);
 
 ### `server.set_pair(entity, id, filter?: MemberFilter)`
 
-Tracks a jecs pair for replication.
+Tracks a jecs pair for replication. The pair **must exist in the world before calling `set_pair`**, because Replecs snapshots the current value for the initial sync.
 
 ```ts
 import { pair } from "@rbxts/jecs";
-server.set_pair(entity, pair(Health, Bonus));
+
+// ✅ Correct: add to world first, then register for replication
+world.add(entity, pair(ChildOf, parent));
+server.set_pair(entity, pair(ChildOf, parent));
+
+// ❌ Wrong: set_pair before world.add — initial value is missing
+server.set_pair(entity, pair(ChildOf, parent));
+world.add(entity, pair(ChildOf, parent));
 ```
 
 ### `server.set_relation(entity, relation, filter?: MemberFilter)`
@@ -67,6 +74,20 @@ Tracks a jecs relation (and all its targets) for replication.
 
 ```ts
 server.set_relation(entity, ChildOf);
+```
+
+### `server.set_throttle(component, interval)`
+
+Shorthand for setting replication throttle on a component. Registers a component for rate-limited replication, buffering changes and flushing at the specified interval.
+
+```ts
+import { pair } from "@rbxts/jecs";
+
+// Full form (via ECS)
+world.set(Score, pair(Replecs.Throttle, Score), 1 / 20);
+
+// Shorthand
+server.set_throttle(Score, 1 / 20); // 20Hz
 ```
 
 ### `server.stop_networked(entity, keep?: boolean)`

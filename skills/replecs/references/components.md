@@ -43,6 +43,9 @@ world.set(
 // Throttle at 20Hz
 world.set(MyComponent, pair(Replecs.Throttle, MyComponent), 1 / 20);
 
+// Shorthand
+server.set_throttle(MyComponent, 1 / 20);
+
 // Grant ownership to player
 world.set(entity, pair(Replecs.Owned, MyPosition), player);
 

@@ -258,8 +258,11 @@ Rate-limit replication of specific components:
 ```ts
 import { pair } from "@rbxts/jecs";
 
-// Mark component as throttled (flushes every 0.05s = 20Hz)
+// Full form (via ECS)
 world.set(MyComponent, pair(Replecs.Throttle, MyComponent), 0.05);
+
+// Shorthand
+server.set_throttle(MyComponent, 0.05); // flushes every 0.05s = 20Hz
 
 // Throttled components are buffered and flushed during collect_updates()
 // Unreliable components bypass throttle entirely
