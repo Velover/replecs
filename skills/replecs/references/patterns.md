@@ -295,16 +295,10 @@ world.set(Color, Replecs.Serdes, {
 ## Hook: Transform Replicated Values
 
 ```ts
-import { pair } from "@rbxts/jecs";
-
 // Scale all received positions by a factor
-client.override(
-  "changed",
-  pair(Replecs.Reliable, Position),
-  (entity, id, value) => {
-    world.set(entity, Position, value.mul(2));
-  },
-);
+client.override("changed", Position, (entity, id, value, added) => {
+  world.set(entity, Position, value.mul(2));
+});
 ```
 
 ## Hook: Entity Lifecycle
@@ -331,14 +325,14 @@ client.hook("deleted", entity, (entity) => {
 
 ## Client-Side Interpolation
 
-Smoothly interpolate replicated values with jitter compensation:
+Smoothly interpolate replicated values with jitter compensation. Use **unreliable** for high-frequency interpolated data and **reliable** for important state:
 
 ```ts
 import Replecs from "@rbxts/replecs-extended";
 import { pair } from "@rbxts/jecs";
 
 const interp = Replecs.create_interpolation({
-  base_delay: 1 / 20, // match reliable replication rate
+  base_delay: 1 / 20, // match unreliable replication rate
   jitter_smoothing: 0.1,
 });
 
@@ -346,40 +340,38 @@ const interp = Replecs.create_interpolation({
 interp.register(Position, (a: CFrame, b: CFrame, t: number) => a.Lerp(b, t));
 interp.register(Rotation, (a: CFrame, b: CFrame, t: number) => a.Slerp(b, t));
 
-// Feed snapshots from hooks
-client.hook(
-  "changed",
-  pair(Replecs.Reliable, Position),
-  (entity, id, value) => {
-    interp.push(entity, Position, value, os.clock());
-  },
-);
+// Feed snapshots from hooks — no ownership guard needed,
+// hooks don't fire for owned components automatically
+// Bare component covers all channels (reliable + unreliable + relation)
+client.hook("changed", Position, (entity, id, value, added) => {
+  interp.push(entity, Position, value, os.clock());
+});
+
+// Reliable components: no interpolation, hooks write directly
+client.hook("changed", Health, (entity, id, value, added) => {
+  // Value already written to world by hook
+  updateHealthUI(entity, value);
+});
 
 // Clean up on entity deletion
 client.hook("deleted", entity, (entity) => {
   interp.remove_entity(entity);
 });
 
+// Clean up on component removal
+client.hook("removed", Position, (entity, id) => {
+  interp.remove_component(entity, Position);
+});
+
 // Render system — runs every frame
 function INTERPOLATION_SYSTEM() {
-  for (const [entity] of world.query(Position)) {
-    const pos = interp.get(entity, Position);
-    if (pos !== undefined) {
-      const part = world.get(entity, VisualPart) as BasePart;
-      part.CFrame = pos;
-    }
-  }
-}
-```
-
-For ownership-controlled entities, skip interpolation:
-
-```ts
-function INTERPOLATION_SYSTEM() {
-  for (const [entity] of world.query(Position)) {
-    if (client.has_ownership(entity, Position)) continue;
-    const pos = interp.get(entity, Position);
-    // ...
+  for (const [entity, rawPos] of world.query(Position)) {
+    // Owner uses raw predicted value, non-owners use interpolated
+    const pos = client.has_ownership(entity, Position)
+      ? rawPos
+      : (interp.get(entity, Position) ?? rawPos);
+    const part = world.get(entity, VisualPart) as BasePart;
+    part.CFrame = pos;
   }
 }
 ```

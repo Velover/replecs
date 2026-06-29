@@ -44,7 +44,7 @@ type HookMethod =
 		self: Client,
 		action: "changed",
 		relation: Component,
-		callback: (entity: Entity, id: Component, value: any) -> ()
+		callback: (entity: Entity, id: Component, value: any, added: boolean) -> ()
 	) -> Disconnect)
 	& ((
 		self: Client,
@@ -56,7 +56,7 @@ type HookMethod =
 
 type ChangedHooksEntry = {
 	overrides: boolean,
-	callbacks: Array<(entity: Entity, id: Component, value: any) -> ()>,
+	callbacks: Array<(entity: Entity, id: Component, value: any, added: boolean) -> ()>,
 }
 type RemovedHooksEntry = {
 	overrides: boolean,
@@ -164,6 +164,7 @@ local PACKET_TYPES = {
 local ECS_NAME = common.ecs_name
 local ECS_WILDCARD = common.wildcard
 local PAIR = common.pair
+local IS_PAIR = common.is_pair
 local ITERATE_ALL_RELATIONS = common.iterate_all_relations
 local WORLD_ENTITY = common.world_entity
 local WORLD_ADD = common.world_add
@@ -240,12 +241,25 @@ function client_replicator.entity_set(
 		local command_buffer = get_or_create_command_buffer(client, entity)
 		command_buffer.components[id] = { value = value }
 	else
+		-- skip replicated changes for owned components (owner already has latest)
+		-- but allow initial sync (component doesn't exist yet) and overrides
+		local entity_grants = client.ownership_grants[entity]
+		local is_owned = entity_grants and entity_grants[id]
+		local is_change = WORLD_HAS(client.world, entity, id)
+		local has_override = changed_hooks and changed_hooks.overrides
+
+		if is_owned and is_change and not has_override then
+			return
+		end
+
+		local added = not is_change
+
 		if changed_hooks then
 			if not changed_hooks.overrides then
 				WORLD_SET(client.world, entity, id, value)
 			end
 			for _, callback in changed_hooks.callbacks do
-				callback(entity, id, value)
+				callback(entity, id, value, added)
 			end
 		else
 			WORLD_SET(client.world, entity, id, value)
@@ -258,12 +272,25 @@ function client_replicator.entity_add(client: Client, entity: Entity, tag: Entit
 		local command_buffer = get_or_create_command_buffer(client, entity)
 		command_buffer.tags[tag] = true
 	else
+		-- skip replicated changes for owned tags (owner already has latest)
+		-- but allow initial sync (tag doesn't exist yet) and overrides
+		local entity_grants = client.ownership_grants[entity]
+		local is_owned = entity_grants and entity_grants[tag]
+		local is_change = WORLD_HAS(client.world, entity, tag)
+		local has_override = changed_hooks and changed_hooks.overrides
+
+		if is_owned and is_change and not has_override then
+			return
+		end
+
+		local added = not is_change
+
 		if changed_hooks then
 			if not changed_hooks.overrides then
 				WORLD_ADD(client.world, entity, tag)
 			end
 			for _, callback in changed_hooks.callbacks do
-				callback(entity, tag)
+				callback(entity, tag, nil, added)
 			end
 		else
 			WORLD_ADD(client.world, entity, tag)
@@ -1741,31 +1768,52 @@ end
 
 local function add_hook_entry(client: Client, action: string, ...): ({ overrides: boolean }, () -> ())
 	if action == "changed" or action == "removed" then
-		local relation = select(1, ...) :: Entity
-		local callback = select(2, ...) :: (entity: Entity, id: Component, value: any) -> ()
+		local id = select(1, ...) :: Entity
+		local callback = select(2, ...) :: (entity: Entity, id: Component, value: any, added: boolean) -> ()
 		local hooks = action == "changed" and client.network_hooks.changed or client.network_hooks.removed
-		local entries = hooks[relation] :: ChangedHooksEntry
 
-		if not entries then
-			entries = {
-				overrides = false,
-				callbacks = {},
+		-- Bare component → register under reliable + unreliable + relation pairs
+		-- Pair → register under that pair only (backward compatible)
+		local keys: { Entity }
+		if IS_PAIR(id) then
+			keys = { id }
+		else
+			keys = {
+				PAIR(client.components.reliable, id),
+				PAIR(client.components.unreliable, id),
+				PAIR(client.components.relation, id),
 			}
-			hooks[relation] = entries
 		end
-		table.insert(entries.callbacks, callback)
+
+		local entries_list: { ChangedHooksEntry } = {}
+
+		for _, key in keys do
+			local entries = hooks[key] :: ChangedHooksEntry
+			if not entries then
+				entries = {
+					overrides = false,
+					callbacks = {},
+				}
+				hooks[key] = entries
+			end
+			table.insert(entries_list, entries)
+			table.insert(entries.callbacks, callback)
+		end
 
 		local function disconnect()
-			local callbacks = entries.callbacks
-			local index = table.find(callbacks, callback)
-			if index then
-				table.remove(callbacks, index)
-				if #callbacks == 0 then
-					hooks[relation] = nil
+			for i, key in keys do
+				local entries = entries_list[i]
+				local callbacks = entries.callbacks
+				local index = table.find(callbacks, callback)
+				if index then
+					table.remove(callbacks, index)
+					if #callbacks == 0 then
+						hooks[key] = nil
+					end
 				end
 			end
 		end
-		return entries, disconnect
+		return entries_list[1], disconnect
 	elseif action == "deleted" then
 		local entity = select(1, ...) :: Entity
 		local callback = select(2, ...) :: (entity: Entity) -> ()

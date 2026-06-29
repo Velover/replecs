@@ -134,6 +134,44 @@ When a player leaves, `server:remove_client(player)` is called automatically (vi
 
 This is **eager** cleanup (unlike masking which uses lazy cleanup) because stale ownership entries would **block the server from modifying those components** via `check_ownership_mutual_exclusion`.
 
+## Client-Side Ownership Guard
+
+When the server replicates a value back to the owning client (the roundtrip from `request_set` → server → broadcast), the client automatically **skips** overwriting the local value. This is handled in `entity_set` and `entity_add` at the replication layer.
+
+The guard has three conditions — all must be true to skip:
+
+1. **Client owns the component** (`ownership_grants[entity][component] == true`)
+2. **Component already exists in the world** (not an initial sync)
+3. **No override is registered** for this component
+
+| Scenario                                   | World Write | Hook Callbacks | Override Callbacks |
+| ------------------------------------------ | ----------- | -------------- | ------------------ |
+| Initial sync (component doesn't exist yet) | ✅          | ✅             | ✅                 |
+| Changed, not owned                         | ✅          | ✅             | ✅                 |
+| Changed, owned, no override                | ❌ skip     | ❌ skip        | —                  |
+| Changed, owned, has override               | ❌ skip     | ❌ skip        | ✅ fires           |
+
+This means:
+
+- **Hooks** never fire for owned component changes — the stale roundtrip is silently dropped.
+- **Overrides** still fire, giving the override author control over whether to accept or reject the server value.
+- **Initial syncs** always go through, so the world gets populated correctly on join.
+
+```ts
+// Hook: no guard needed — it won't fire for owned components
+client.hook("changed", TurretAim, (entity, id, value, added) => {
+  // This only runs for non-owners
+  interp.push(entity, TurretAim, value, os.clock());
+});
+
+// Override: fires even for owned components — you decide what to do
+client.override("changed", TurretAim, (entity, id, value, added) => {
+  // Called even for owned components
+  // Default: reject (don't write to world)
+  // Or accept: world.set(entity, TurretAim, value);
+});
+```
+
 ## Client-Side Tracking
 
 On the client, ownership state is tracked in two maps:

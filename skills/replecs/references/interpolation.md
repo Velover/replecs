@@ -62,23 +62,15 @@ Push a new snapshot for an entity/component. Call this from a hook or override c
 
 ```ts
 // Via hook (value is also written to the world automatically)
-client.hook(
-  "changed",
-  pair(Replecs.Reliable, Position),
-  (entity, id, value) => {
-    interp.push(entity, Position, value, os.clock());
-  },
-);
+client.hook("changed", Position, (entity, id, value, added) => {
+  interp.push(entity, Position, value, os.clock());
+});
 
 // Via override (you handle writing the value)
-client.override(
-  "changed",
-  pair(Replecs.Unreliable, Position),
-  (entity, id, value) => {
-    interp.push(entity, Position, value, os.clock());
-    world.set(entity, Position, value); // write manually
-  },
-);
+client.override("changed", Position, (entity, id, value, added) => {
+  interp.push(entity, Position, value, os.clock());
+  world.set(entity, Position, value); // write manually
+});
 ```
 
 ### `interp.get<T>(entity, component): T | undefined`
@@ -114,7 +106,8 @@ client.hook("deleted", entity, (entity) => {
 Remove buffered state for a specific component on an entity. Also cleans up the entity entry if no components remain.
 
 ```ts
-client.hook("removed", pair(Replecs.Reliable, Position), (entity, id) => {
+// Bare component covers all channels
+client.hook("removed", Position, (entity, id) => {
   interp.remove_component(entity, Position);
 });
 ```
@@ -198,21 +191,45 @@ client.override(
 );
 ```
 
-### Pausing Interpolation
+### Ownership and Interpolation
 
-To freeze interpolation (e.g. when the player has ownership):
+When a component is client-owned, the replication layer automatically skips overwriting the world value on stale roundtrips. Hooks don't fire for owned components, so you can feed interpolation from hooks without guarding:
 
 ```ts
+// No ownership check needed — hook won't fire for the owner
+client.hook(
+  "changed",
+  pair(Replecs.Unreliable, Position),
+  (entity, id, value) => {
+    interp.push(entity, Position, value, os.clock());
+  },
+);
+
+// In the render system, the owner uses the raw predicted value,
+// non-owners use interpolated
 function INTERPOLATION_SYSTEM() {
-  for (const [entity, ownedPos] of world.query(OwnedPosition)) {
-    if (client.has_ownership(entity, Position)) {
-      // Skip interpolation — player controls this entity directly
-      continue;
-    }
-    const pos = interp.get(entity, Position);
-    // ...
+  for (const [entity, rawPos] of world.query(Position)) {
+    const pos = client.has_ownership(entity, Position)
+      ? rawPos // owner: direct predicted value
+      : (interp.get(entity, Position) ?? rawPos); // others: interpolated
+
+    const part = world.get(entity, VisualPart) as BasePart;
+    part.CFrame = pos;
   }
 }
+```
+
+If you need to accept server values even when owned (e.g. server-authoritative correction), use an override instead:
+
+```ts
+client.override(
+  "changed",
+  pair(Replecs.Unreliable, Position),
+  (entity, id, value) => {
+    interp.push(entity, Position, value, os.clock());
+    world.set(entity, Position, value); // write manually
+  },
+);
 ```
 
 ---

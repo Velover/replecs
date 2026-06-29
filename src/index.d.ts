@@ -116,10 +116,22 @@ declare namespace Replecs {
     after_replication(callback: () => void): void;
     added(callback: (entity: Entity) => void): () => void;
 
+    // Simplified: bare component → auto-registers under both reliable & unreliable
+    hook<T>(
+      action: "changed",
+      component: Id<T>,
+      callback: (entity: Entity, id: Id<T>, value: T, added: boolean) => void,
+    ): () => void;
+    hook<T>(
+      action: "removed",
+      component: Id<T>,
+      callback: (entity: Entity, id: Id<T>) => void,
+    ): () => void;
+    // Legacy: explicit pair still works
     hook<T>(
       action: "changed",
       relation: Pair<MemberFilter, T>,
-      callback: (entity: Entity, id: Id<T>, value: T) => void,
+      callback: (entity: Entity, id: Id<T>, value: T, added: boolean) => void,
     ): () => void;
     hook<T>(
       action: "removed",
@@ -132,10 +144,22 @@ declare namespace Replecs {
       callback: (entity: Entity) => void,
     ): () => void;
 
+    // Simplified: bare component → auto-registers under both reliable & unreliable
+    override<T>(
+      action: "changed",
+      component: Id<T>,
+      callback: (entity: Entity, id: Id<T>, value: T, added: boolean) => void,
+    ): () => void;
+    override<T>(
+      action: "removed",
+      component: Id<T>,
+      callback: (entity: Entity, id: Id<T>) => void,
+    ): () => void;
+    // Legacy: explicit pair still works
     override<T>(
       action: "changed",
       relation: Pair<MemberFilter, T>,
-      callback: (entity: Entity, id: Id<T>, value: any) => void,
+      callback: (entity: Entity, id: Id<T>, value: T, added: boolean) => void,
     ): () => void;
     override<T>(
       action: "removed",

@@ -4401,6 +4401,576 @@ TEST("memory leaks", function()
 		CHECK(members[1].client.ownership_buffer[c_entity] == nil)
 		CHECK(members[1].world:contains(c_entity) == false)
 	end)
+
+	CASE("owned component should NOT be overwritten on replicate (changed)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- owner sets a predicted value locally
+		members[1].client:request_set(c_entity, members[1].components[1], "predicted")
+
+		-- server changes the value — simulates stale roundtrip
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		world:set(entity1, components[1], "server_stale")
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- deliver the replicated change to client
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- the owner's predicted value should be preserved, not overwritten by server_stale
+		local val = members[1].world:get(c_entity, members[1].components[1])
+		CHECK(val == "predicted")
+	end)
+
+	CASE("unowned component should still be written on replicate", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- NO ownership — server changes the value
+		world:set(entity1, components[1], "server_update")
+
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		local val = members[1].world:get(c_entity, members[1].components[1])
+		CHECK(val == "server_update")
+	end)
+
+	CASE("initial sync should go through even for owned component", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "synced_value")
+
+		-- grant ownership before sync
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- full sync — initial value should arrive even though owned
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1)
+		CHECK(c_entity ~= nil)
+
+		local val = members[1].world:get(c_entity :: any, members[1].components[1])
+		CHECK(val == "synced_value")
+	end)
+
+	CASE("override should receive owned values even when component exists", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- install override that tracks calls
+		local override_called = false
+		local override_value: any = nil
+		members[1].client:override(
+			"changed",
+			jecs.pair(replecs.reliable, members[1].components[1]),
+			function(_entity: any, _id: any, value: any)
+				override_called = true
+				override_value = value
+			end
+		)
+
+		-- owner sets predicted value
+		members[1].client:request_set(c_entity, members[1].components[1], "predicted")
+
+		-- simulate server stale roundtrip
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		world:set(entity1, components[1], "server_stale")
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- override should have been called with the server value
+		CHECK(override_called == true)
+		CHECK(override_value == "server_stale")
+
+		-- world value should NOT have been written by override (default behavior)
+		-- since override only gets callback, not world write
+		local world_val = members[1].world:get(c_entity, members[1].components[1])
+		CHECK(world_val == "predicted")
+	end)
+
+	CASE("hook should NOT fire on owned component change", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- install hook that tracks calls
+		local hook_called = false
+		members[1].client:hook(
+			"changed",
+			jecs.pair(replecs.reliable, members[1].components[1]),
+			function(_entity: any, _id: any, _value: any)
+				hook_called = true
+			end
+		)
+
+		-- owner sets predicted value
+		members[1].client:request_set(c_entity, members[1].components[1], "predicted")
+
+		-- simulate server stale roundtrip
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		world:set(entity1, components[1], "server_stale")
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- hook should NOT have been called (owned component, already exists)
+		CHECK(hook_called == false)
+		-- world value should be preserved
+		local val = members[1].world:get(c_entity, members[1].components[1])
+		CHECK(val == "predicted")
+	end)
+
+	CASE("non-owner should still receive owned component updates", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync to both
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+
+		-- grant ownership to member1 only
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- revoke, change, re-grant to simulate owner sending value through server
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		world:set(entity1, components[1], "from_owner")
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- member2 (non-owner) should receive the value
+		local c_entity2 = client_entity(members[2], entity1) :: any
+		local val2 = members[2].world:get(c_entity2, members[2].components[1])
+		CHECK(val2 == "from_owner")
+
+		-- member1 (owner) should keep predicted value (or initial since no prediction)
+		local c_entity1 = client_entity(members[1], entity1) :: any
+		local val1 = members[1].world:get(c_entity1, members[1].components[1])
+		CHECK(val1 == "initial")
+	end)
+end)
+
+TEST("simplified hook API", function()
+	local world: jecs.World = nil :: any
+	local server: replecs.Server = nil :: any
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		server = replecs.create_server(world)
+	end)
+
+	AFTER_EACH(function()
+		server:destroy()
+	end)
+
+	local function create_members_data(count: number?)
+		local members = {} :: { MemberData }
+		for i = 1, (count or 3) do
+			local new_world = jecs.world()
+			local components = create_test_components(new_world)
+			local tags = create_test_tags(new_world)
+			local replicator = replecs.create_client(new_world)
+
+			local member_mt = {
+				world = new_world,
+				client = replicator,
+				components = components,
+				tags = tags,
+			}
+			local member = newproxy(true)
+			getmetatable(member).__index = member_mt
+
+			server.masking:register_client(member)
+			table.insert(members, member :: MemberData)
+		end
+		return members
+	end
+
+	local function client_entity(member: MemberData, server_entity: jecs.Entity): jecs.Entity?
+		local entity = member.client.server_ids[server_entity :: any]
+		if entity and member.world:contains(entity) then
+			return entity
+		end
+		return nil
+	end
+
+	CASE("bare component hook fires on reliable changes", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		local hook_value: any = nil
+		local hook_added: boolean? = nil
+
+		-- bare component — no pair needed
+		members[1].client:hook(
+			"changed",
+			members[1].components[1],
+			function(_entity: any, _id: any, value: any, added: boolean)
+				hook_value = value
+				hook_added = added
+			end
+		)
+
+		-- change value via server update
+		world:set(entity1, components[1], "updated")
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		CHECK(hook_value == "updated")
+		CHECK(hook_added == false)
+	end)
+
+	CASE("bare component hook fires with added=true on initial sync", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local hook_value: any = nil
+		local hook_added: boolean? = nil
+
+		-- register hook before sync
+		members[1].client:hook(
+			"changed",
+			members[1].components[1],
+			function(_entity: any, _id: any, value: any, added: boolean)
+				hook_value = value
+				hook_added = added
+			end
+		)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		CHECK(hook_value == "initial")
+		CHECK(hook_added == true)
+	end)
+
+	CASE("bare component hook fires on unreliable changes", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_unreliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		local hook_value: any = nil
+
+		-- bare component covers both reliable and unreliable
+		members[1].client:hook(
+			"changed",
+			members[1].components[1],
+			function(_entity: any, _id: any, value: any, _added: boolean)
+				hook_value = value
+			end
+		)
+
+		-- unreliable change
+		world:set(entity1, components[1], "unreliable_val")
+		for player, ubuf, uchanges in server:collect_unreliable() do
+			local member: MemberData = player :: any
+			member.client:apply_unreliable(ubuf, uchanges)
+		end
+
+		CHECK(hook_value == "unreliable_val")
+	end)
+
+	CASE("bare component hook disconnect stops callbacks", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		local count = 0
+		local disconnect = members[1].client:hook(
+			"changed",
+			members[1].components[1],
+			function(_entity: any, _id: any, _value: any, _added: boolean)
+				count += 1
+			end
+		)
+
+		-- first change fires
+		world:set(entity1, components[1], "val1")
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+		CHECK(count == 1)
+
+		-- disconnect
+		disconnect()
+
+		-- second change should NOT fire
+		world:set(entity1, components[1], "val2")
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+		CHECK(count == 1)
+	end)
+
+	CASE("bare component removed hook fires", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- drain additions so subsequent removals go through masking
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		local removed = false
+		members[1].client:hook("removed", members[1].components[1], function(_entity: any, _id: any)
+			removed = true
+		end)
+
+		-- remove component
+		world:remove(entity1, components[1])
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		CHECK(removed == true)
+	end)
+
+	CASE("legacy pair hook still works", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		local hook_value: any = nil
+
+		-- legacy pair syntax still works
+		members[1].client:hook(
+			"changed",
+			jecs.pair(replecs.reliable, members[1].components[1]),
+			function(_entity: any, _id: any, value: any, _added: boolean)
+				hook_value = value
+			end
+		)
+
+		world:set(entity1, components[1], "updated")
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		CHECK(hook_value == "updated")
+	end)
 end)
 
 local report = testlib.run(plan)

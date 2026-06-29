@@ -117,47 +117,69 @@ for (const [buf, variants] of client.collect_ownership_unreliable()) {
 
 ## Hooks & Overrides
 
-### `client.hook(action, relation, callback): Disconnect`
+### `client.hook(action, componentOrPair, callback): Disconnect`
 
 Registers a hook that fires when a replicated value changes/is removed. The value is also written to the world.
 
-```ts
-import { pair } from "@rbxts/jecs";
+**Bare component (recommended):** pass a component directly — the hook auto-registers under the reliable, unreliable, and relation pair variants. This means one `hook()` call covers all replication channels.
 
+**Pair (legacy/advanced):** pass a `pair(Replecs.Reliable, Component)` to register only for that specific channel.
+
+**Callback signature for `"changed"`:** `(entity, id, value, added: boolean) -> ()`
+
+- `added` is `true` when the component is being set for the first time (initial sync), `false` for subsequent updates.
+
+**Callback signature for `"removed"`:** `(entity, id) -> ()`
+
+**Ownership guard:** hooks do **not** fire when the client owns the component and the value already exists in the world. This prevents stale roundtrip values from the server overwriting the owner's predicted state. Hooks **do** fire for initial syncs (component doesn't exist yet).
+
+```ts
+// Bare component — covers all channels automatically
 const disconnect = client.hook(
   "changed",
-  pair(Replecs.Reliable, Position),
-  (entity, id, value) => {
-    print("Position updated:", entity, value);
+  Position,
+  (entity, id, value, added) => {
+    // Only fires for non-owned components, or initial sync
+    print("Position updated:", entity, value, added ? "new" : "updated");
   },
 );
 
-const disconnect2 = client.hook(
-  "removed",
+// Also works for removals
+const disconnect2 = client.hook("removed", Position, (entity, id) => {
+  print("Component removed:", entity, id);
+});
+
+// Legacy pair syntax still works (single channel only)
+import { pair } from "@rbxts/jecs";
+const disconnect3 = client.hook(
+  "changed",
   pair(Replecs.Reliable, Position),
-  (entity, id) => {
-    print("Component removed:", entity, id);
+  (entity, id, value, added) => {
+    /* ... */
   },
 );
 
-const disconnect3 = client.hook("deleted", entity, (entity) => {
+// Entity deletion hook (unchanged)
+const disconnect4 = client.hook("deleted", entity, (entity) => {
   print("Entity deleted:", entity);
 });
 ```
 
-### `client.override(action, relation, callback): Disconnect`
+### `client.override(action, componentOrPair, callback): Disconnect`
 
 Registers an override that fires when a replicated value changes/is removed. The value is **NOT** written to the world — you must do it manually. Useful for intercepting and transforming values.
 
-```ts
-import { pair } from "@rbxts/jecs";
+**Ownership guard:** overrides **do** fire even when the client owns the component, giving the override author full control over whether to accept or reject server values. The world value is still not auto-written (override semantics).
 
+```ts
+// Bare component
 const disconnect = client.override(
   "changed",
-  pair(Replecs.Reliable, Position),
-  (entity, id, value) => {
-    // Custom handling - value is NOT auto-written
-    world.set(entity, Position, customTransform(value));
+  Position,
+  (entity, id, value, added) => {
+    // Fires even for owned components — you decide
+    // Default: don't write (rejects the server value)
+    // To accept: world.set(entity, Position, value);
   },
 );
 ```
