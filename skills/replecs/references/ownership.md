@@ -36,8 +36,8 @@ Server                          Client
   │  ←── buf, variants ──────────│  for buf, variants in
   │                               │    client:collect_ownership()
   │  6. Apply ownership update    │
-  │  server:apply_ownership_      │
-  │    reliable(buf, player, v)   │
+  │  server:apply_ownership(      │
+  │    buf, player, variants)     │
   │                               │
   │  7. Value replicated to       │
   │     other clients via         │
@@ -111,16 +111,17 @@ If validation fails, the update is silently dropped.
 
 ## Reliable vs Unreliable
 
-|                  | Reliable                           | Unreliable                                       |
-| ---------------- | ---------------------------------- | ------------------------------------------------ |
-| Transport        | `collect_ownership()`              | `collect_ownership_unreliable()`                 |
-| Server apply     | `apply_ownership_reliable()`       | `apply_ownership_unreliable()`                   |
-| Buffer           | `ownership_buffer`                 | `ownership_unreliable_buffer`                    |
-| Use case         | Infrequent but important updates   | High-frequency updates (e.g. position)           |
-| Delivery         | Guaranteed, ordered                | Best-effort, may be dropped                      |
-| Server broadcast | Via `collect_updates()` (reliable) | Via `collect_unreliable()` + `collect_updates()` |
+Reliability is determined by **how the component is registered on the server** (via `set_reliable` or `set_unreliable`), not by the client at send time. The client always sends ownership updates through a single channel, and the server routes based on the component's track type:
 
-**Unreliable ownership** writes the value to both storage AND the unreliable broadcast mask, so other clients see it through both reliable delta changes and unreliable snapshots.
+|                  | Reliable                                          | Unreliable                                        |
+| ---------------- | ------------------------------------------------- | ------------------------------------------------- |
+| Registration     | `server.set_reliable(entity, component)`          | `server.set_unreliable(entity, component)`        |
+| Server routing   | Value stored in server storage via delta tracking | Value set directly in world; unreliable broadcast |
+| Server broadcast | Via `collect_updates()` (reliable deltas)         | Via `collect_unreliable()` (per-tick snapshots)   |
+| Use case         | Infrequent but important updates                  | High-frequency updates (e.g. position)            |
+| Delivery         | Guaranteed, ordered                               | Best-effort, may be dropped                       |
+
+**Unreliable ownership** sets the value directly in the world (via `world:set`) and marks it for unreliable broadcast. Other clients see it through `collect_unreliable()` snapshots.
 
 ## Player Leave Cleanup
 
@@ -135,7 +136,7 @@ This is **eager** cleanup (unlike masking which uses lazy cleanup) because stale
 
 ## Client-Side Tracking
 
-On the client, ownership state is tracked in three maps:
+On the client, ownership state is tracked in two maps:
 
 | Map                           | Type                                          | Purpose                           |
 | ----------------------------- | --------------------------------------------- | --------------------------------- |
@@ -174,6 +175,5 @@ client.request_set(entity, Position, newPos);
 
 ```ts
 // Client sends ownership updates but server never calls:
-server.apply_ownership_reliable(buf, player, variants);
-// Values are never applied to the world
+server.apply_ownership(buf, player, variants);
 ```

@@ -157,9 +157,8 @@ local PACKET_TYPES = {
 	entity = 2,
 	updates = 3,
 	unreliable = 4,
-	ownership_reliable = 5,
-	ownership_unreliable = 6,
-	ownership_grant = 7,
+	ownership = 5,
+	ownership_grant = 6,
 }
 
 local ECS_NAME = common.ecs_name
@@ -1520,7 +1519,6 @@ function client_replicator.apply_ownership_grant(client: Client, buf: buffer, al
 	table.clear(client.ownership_grants)
 
 	local total_packets = cursor.read_vlq(c)
-	local variant_start = (all_variants and #all_variants + 1) :: number
 
 	for _a = 1, total_packets do
 		local total_grants = cursor.read_vlq(c)
@@ -1639,11 +1637,11 @@ local function collect_ownership_from_buffer(
 end
 
 function client_replicator.collect_ownership(client: Client)
-	return collect_ownership_from_buffer(client, client.ownership_buffer, PACKET_TYPES.ownership_reliable)
+	return collect_ownership_from_buffer(client, client.ownership_buffer, PACKET_TYPES.ownership)
 end
 
 function client_replicator.collect_ownership_unreliable(client: Client)
-	return collect_ownership_from_buffer(client, client.ownership_unreliable_buffer, PACKET_TYPES.ownership_unreliable)
+	return collect_ownership_from_buffer(client, client.ownership_unreliable_buffer, PACKET_TYPES.ownership)
 end
 
 function client_replicator.set_serdes(client: Client, component: Component, serdes: types.Serdes)

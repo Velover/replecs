@@ -72,38 +72,44 @@ if (client.has_ownership(entity, Position)) {
 }
 ```
 
-### `client.request_set<T>(entity, component, value, unreliable?: boolean)`
+### `client.request_set<T>(entity, component, value, unreliable?)`
 
 Requests a value change for a component the client owns. **Immediately writes the value to the local world** for instant client-side prediction, and also buffers it for replication to the server.
 
-- `unreliable = false` (default): buffered in reliable ownership buffer
-- `unreliable = true`: buffered in unreliable ownership buffer
+The optional `unreliable` parameter determines which buffer (and therefore which zap event) the update is queued into:
 
-The raw value is stored and serialized at collect time (when `collect_ownership` is called), ensuring correct variant ordering. Throttle is **not** applied to ownership updates — values are always buffered immediately.
+- **`false` (default)**: buffered into `ownership_buffer`, collected via `collect_ownership()`, sent over the reliable channel
+- **`true`**: buffered into `ownership_unreliable_buffer`, collected via `collect_ownership_unreliable()`, sent over the unreliable channel
+
+The raw value is stored and serialized at collect time (when `collect_ownership` / `collect_ownership_unreliable` is called), ensuring correct variant ordering. Throttle is **not** applied to ownership updates — values are always buffered immediately.
+
+The server does not need separate handlers — a single `server.apply_ownership()` routes internally based on the component's registered track type (`set_reliable` / `set_unreliable`).
 
 ```ts
-// Sets the value in the local world AND buffers for server replication
-client.request_set(entity, Position, newPos); // reliable
-client.request_set(entity, Position, newPos, true); // unreliable
+// Sets the value in the local world AND buffers for reliable replication
+client.request_set(entity, Position, newPos);
+
+// Buffers for unreliable replication instead
+client.request_set(entity, Position, newPos, true);
 ```
 
 ### `client.collect_ownership(): () => [buffer, variants]`
 
-Iterator that serializes and yields reliable ownership updates. Clears the reliable buffer after yielding. Send via reliable remote.
+Iterator that serializes and yields **reliable** ownership updates. Clears the buffer after yielding. Send via the reliable zap event.
 
 ```ts
 for (const [buf, variants] of client.collect_ownership()) {
-  SendToServerReliable(buf, variants);
+  zap.OnOwnershipReliable.Fire(buf, variants);
 }
 ```
 
 ### `client.collect_ownership_unreliable(): () => [buffer, variants]`
 
-Iterator that serializes and yields unreliable ownership updates. Clears the unreliable buffer after yielding. Send via unreliable remote.
+Iterator that serializes and yields **unreliable** ownership updates. Clears the buffer after yielding. Send via the unreliable zap event.
 
 ```ts
 for (const [buf, variants] of client.collect_ownership_unreliable()) {
-  SendToServerUnreliable(buf, variants);
+  zap.OnOwnershipUnreliable.Fire(buf, variants);
 }
 ```
 

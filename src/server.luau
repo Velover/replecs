@@ -89,8 +89,7 @@ export type ServerImp = {
 	remove_serdes: (self: Server, id: Component) -> (),
 
 	collect_ownership_grant: (self: Server) -> () -> (Player, buffer, { { any } }),
-	apply_ownership_reliable: (self: Server, buf: buffer, player: Player, all_variants: { { any } }?) -> (),
-	apply_ownership_unreliable: (self: Server, buf: buffer, player: Player, all_variants: { { any } }?) -> (),
+	apply_ownership: (self: Server, buf: buffer, player: Player, all_variants: { { any } }?) -> (),
 }
 
 export type Server = ServerImp & {
@@ -169,9 +168,8 @@ local PACKET_TYPES = {
 	entity = 2,
 	updates = 3,
 	unreliable = 4,
-	ownership_reliable = 5,
-	ownership_unreliable = 6,
-	ownership_grant = 7,
+	ownership = 5,
+	ownership_grant = 6,
 }
 
 local MAX_PACKET_SIZE = 900
@@ -2094,17 +2092,10 @@ local function validate_ownership_entry(server: Server, player: Player, entity: 
 	return true
 end
 
-local function safe_apply_ownership(
-	server: Server,
-	buf: buffer,
-	player: Player,
-	all_variants: { { any } }?,
-	expected_packet_type: number,
-	is_unreliable: boolean
-)
+local function safe_apply_ownership(server: Server, buf: buffer, player: Player, all_variants: { { any } }?)
 	local ok, err = pcall(function()
 		local c = cursor.from(buf)
-		check_packet_type(c, expected_packet_type)
+		check_packet_type(c, PACKET_TYPES.ownership)
 		local total_packets = cursor.read_vlq(c)
 		local variant_start = (all_variants and #all_variants + 1) :: number
 
@@ -2140,14 +2131,17 @@ local function safe_apply_ownership(
 					continue
 				end
 
-				-- apply the value (buffered if throttled)
-				buffer_or_allocate_component_change(server, entity, component, value, false, true)
+				-- look up the component's registered track type to determine replication path
+				local component_track_info = server.track_info.components[component]
+				local track_type = component_track_info and component_track_info[entity]
 
-				if is_unreliable then
-					-- mark as unreliable update for replication to other clients
-					if not server.additions[entity] and server.track_info.networked[entity] then
-						server.masking:allocate_unreliable_addition(entity, component)
-					end
+				if track_type == COMPONENT_TYPES.unreliable then
+					-- unreliable: set value in the world — the world hook will handle
+					-- marking unreliable addition for replication to other clients
+					server.world:set(entity, component, value)
+				else
+					-- reliable: buffer the change (buffered if throttled)
+					buffer_or_allocate_component_change(server, entity, component, value, false, true)
 				end
 			end
 		end
@@ -2158,22 +2152,8 @@ local function safe_apply_ownership(
 	end
 end
 
-function server_replicator.apply_ownership_reliable(
-	server: Server,
-	buf: buffer,
-	player: Player,
-	all_variants: { { any } }?
-)
-	safe_apply_ownership(server, buf, player, all_variants, PACKET_TYPES.ownership_reliable, false)
-end
-
-function server_replicator.apply_ownership_unreliable(
-	server: Server,
-	buf: buffer,
-	player: Player,
-	all_variants: { { any } }?
-)
-	safe_apply_ownership(server, buf, player, all_variants, PACKET_TYPES.ownership_unreliable, true)
+function server_replicator.apply_ownership(server: Server, buf: buffer, player: Player, all_variants: { { any } }?)
+	safe_apply_ownership(server, buf, player, all_variants)
 end
 
 function server_replicator.start_networked(server: Server, entity: Entity, filter: AnyFilter?)

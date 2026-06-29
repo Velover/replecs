@@ -162,12 +162,7 @@ interface Server extends ServerImp {
     LuaTuple<[Player, buffer, defined[][] | undefined]>
   >;
 
-  apply_ownership_reliable(
-    buf: buffer,
-    player: Player,
-    all_variants?: defined[][],
-  ): void;
-  apply_ownership_unreliable(
+  apply_ownership(
     buf: buffer,
     player: Player,
     all_variants?: defined[][],
@@ -341,9 +336,8 @@ enum PacketType {
   entity = 2,
   updates = 3,
   unreliable = 4,
-  ownership_reliable = 5,
-  ownership_unreliable = 6,
-  ownership_grant = 7,
+  ownership = 5,
+  ownership_grant = 6,
 }
 
 // Component tracking types

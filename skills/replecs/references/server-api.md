@@ -193,13 +193,12 @@ for (const [player, buf, variants] of server.collect_ownership_grant()) {
 
 ## Ownership
 
-### `server.apply_ownership_reliable(buf, player, variants?)`
+### `server.apply_ownership(buf, player, variants?)`
 
-Processes a reliable ownership update from a client. Verifies the player owns the component, deserializes the value, and applies it (including throttle buffering if applicable).
+Processes an ownership update from a client. Verifies the player owns the component, deserializes the value, and routes based on the component's registered track type:
 
-### `server.apply_ownership_unreliable(buf, player, variants?)`
-
-Processes an unreliable ownership update from a client. Same verification, but also marks the value for unreliable broadcast to other clients.
+- **Reliable components**: value is stored via delta tracking for reliable broadcast to other clients
+- **Unreliable components**: value is set directly in the world and marked for unreliable broadcast
 
 ### `server.remove_client(player)`
 

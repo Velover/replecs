@@ -151,15 +151,14 @@ client.apply_unreliable(buf, variants); // unreliable
 
 ### Packet Types
 
-| Type                   | ID  | Description                                 |
-| ---------------------- | --- | ------------------------------------------- |
-| `full`                 | 1   | Complete snapshot for new/joining players   |
-| `entity`               | 2   | Full state of a single entity               |
-| `updates`              | 3   | Delta-tracked reliable changes              |
-| `unreliable`           | 4   | Snapshot of unreliable components           |
-| `ownership_reliable`   | 5   | Client→Server reliable ownership updates    |
-| `ownership_unreliable` | 6   | Client→Server unreliable ownership updates  |
-| `ownership_grant`      | 7   | Server→Client ownership grant notifications |
+| Type              | ID  | Description                                 |
+| ----------------- | --- | ------------------------------------------- |
+| `full`            | 1   | Complete snapshot for new/joining players   |
+| `entity`          | 2   | Full state of a single entity               |
+| `updates`         | 3   | Delta-tracked reliable changes              |
+| `unreliable`      | 4   | Snapshot of unreliable components           |
+| `ownership`       | 5   | Client→Server ownership updates             |
+| `ownership_grant` | 6   | Server→Client ownership grant notifications |
 
 ### Component Types (internal tracking)
 
@@ -218,21 +217,16 @@ client.apply_ownership_grant(buf, variants);
 
 // Client: check ownership & request changes
 if (client.has_ownership(entity, Position)) {
-  client.request_set(entity, Position, newPos); // reliable
-  client.request_set(entity, Position, newPos, true); // unreliable
+  client.request_set(entity, Position, newPos);
 }
 
 // Client: collect & send updates back
 for (const [buf, variants] of client.collect_ownership()) {
-  SendToServer(buf, variants); // reliable
-}
-for (const [buf, variants] of client.collect_ownership_unreliable()) {
-  SendToServer(buf, variants); // unreliable
+  SendToServer(buf, variants);
 }
 
 // Server: apply client ownership updates
-server.apply_ownership_reliable(buf, player, variants);
-server.apply_ownership_unreliable(buf, player, variants);
+server.apply_ownership(buf, player, variants);
 ```
 
 **Mutual exclusion**: The server cannot modify a component that is owned by a client. Ownership must be removed first.

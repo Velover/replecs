@@ -25,11 +25,11 @@ function REPLECS_SERVER()
 end
 
 zap.OnOwnershipReliable.SetCallback(function(player, buf, variants)
-	replicator:apply_ownership_reliable(buf, player, variants)
+	replicator:apply_ownership(buf, player, variants)
 end)
 
 zap.OnOwnershipUnreliable.SetCallback(function(player, buf, variants)
-	replicator:apply_ownership_unreliable(buf, player, variants)
+	replicator:apply_ownership(buf, player, variants)
 end)
 
 scheduler.System(REPLECS_SERVER)

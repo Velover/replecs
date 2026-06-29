@@ -2602,7 +2602,7 @@ TEST("ownership", function()
 
 		-- collect the ownership update
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		CHECK(validate_called == true)
@@ -2683,7 +2683,7 @@ TEST("ownership", function()
 		members[1].client:request_set(c_entity, members[1].components[1], "client_update")
 
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		-- server should have applied the value
@@ -2731,10 +2731,13 @@ TEST("ownership", function()
 		-- unreliable collect should have data
 		local unreliable_applied = false
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership_unreliable() do
-			server:apply_ownership_unreliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 			unreliable_applied = true
 		end
 		CHECK(unreliable_applied == true)
+
+		-- server should have applied the value (routes to reliable path since component is set_reliable)
+		CHECK(server.storage[entity1].components[components[1]] == "unreliable_update")
 	end)
 
 	CASE("should handle mixed reliable and unreliable ownership updates", function()
@@ -2750,7 +2753,7 @@ TEST("ownership", function()
 		local entity1 = world:entity()
 		server:set_networked(entity1)
 		server:set_reliable(entity1, components[1])
-		server:set_reliable(entity1, components[2])
+		server:set_unreliable(entity1, components[2])
 		world:set(entity1, components[1], "initial1")
 		world:set(entity1, components[2], "initial2")
 
@@ -2773,18 +2776,18 @@ TEST("ownership", function()
 		members[1].client:request_set(c_entity, members[1].components[1], "reliable_val")
 		members[1].client:request_set(c_entity, members[1].components[2], "unreliable_val", true)
 
-		-- apply reliable
+		-- apply reliable ownership
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
-		-- apply unreliable
+		-- apply unreliable ownership
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership_unreliable() do
-			server:apply_ownership_unreliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		CHECK(server.storage[entity1].components[components[1]] == "reliable_val")
-		CHECK(server.storage[entity1].components[components[2]] == "unreliable_val")
+		CHECK(server.world:get(entity1, components[2]) == "unreliable_val")
 	end)
 
 	CASE("should clean up ownership when player leaves via remove_client", function()
@@ -3090,7 +3093,7 @@ TEST("ownership", function()
 
 		-- Collect and apply ownership update to server
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		-- Server should have the new value for component2
@@ -3139,7 +3142,7 @@ TEST("ownership", function()
 
 		-- Collect and send to server
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		CHECK(server.storage[entity1].components[components[1]] == "client_predicted")
@@ -3206,7 +3209,7 @@ TEST("ownership", function()
 
 		-- Apply to server
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 		CHECK(server.storage[entity1].components[components[1]] == "should_work")
 	end)
@@ -3271,7 +3274,7 @@ TEST("ownership", function()
 
 		-- Apply to server
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 		CHECK(server.storage[entity1].components[components[1]] == "after_regrant")
 	end)
@@ -3314,7 +3317,7 @@ TEST("ownership", function()
 		end
 
 		-- Ownership for that component should be cleared on the client
-		-- (entity_remove cleans ownership_grants, ownership_buffer, ownership_unreliable_buffer)
+		-- (entity_remove cleans ownership_grants, ownership_buffer)
 		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == false)
 	end)
 
@@ -3352,7 +3355,7 @@ TEST("ownership", function()
 
 		-- Buffer some ownership updates
 		members[1].client:request_set(c_entity, members[1].components[1], "buf1")
-		members[1].client:request_set(c_entity, members[1].components[2], "buf2", true)
+		members[1].client:request_set(c_entity, members[1].components[2], "buf2")
 
 		-- Delete entity from server — this should clean everything
 		world:delete(entity1)
@@ -3372,7 +3375,6 @@ TEST("ownership", function()
 		-- Buffers should be cleaned
 		CHECK(members[1].client.ownership_grants[c_entity] == nil)
 		CHECK(members[1].client.ownership_buffer[c_entity] == nil)
-		CHECK(members[1].client.ownership_unreliable_buffer[c_entity] == nil)
 	end)
 end)
 
@@ -3432,12 +3434,12 @@ TEST("ownership buffer validation", function()
 
 		local empty_buf = buffer.create(0)
 		local ok = pcall(function()
-			server:apply_ownership_reliable(empty_buf, members[1] :: any, {})
+			server:apply_ownership(empty_buf, members[1] :: any, {})
 		end)
 		CHECK(ok == true)
 
 		local ok2 = pcall(function()
-			server:apply_ownership_unreliable(empty_buf, members[1] :: any, {})
+			server:apply_ownership(empty_buf, members[1] :: any, {})
 		end)
 		CHECK(ok2 == true)
 	end)
@@ -3455,7 +3457,7 @@ TEST("ownership buffer validation", function()
 		local buf = buffer.create(1)
 		buffer.writeu8(buf, 0, 5) -- ownership_reliable packet type
 		local ok = pcall(function()
-			server:apply_ownership_reliable(buf, members[1] :: any, {})
+			server:apply_ownership(buf, members[1] :: any, {})
 		end)
 		CHECK(ok == true)
 	end)
@@ -3477,7 +3479,7 @@ TEST("ownership buffer validation", function()
 		buffer.writeu8(buf, 1, 129) -- vlq for total_packets = 1 (read second)
 		buffer.writeu8(buf, 2, 5) -- ownership_reliable packet type (read first)
 		local ok = pcall(function()
-			server:apply_ownership_reliable(buf, members[1] :: any, {})
+			server:apply_ownership(buf, members[1] :: any, {})
 		end)
 		CHECK(ok == true)
 	end)
@@ -3496,7 +3498,7 @@ TEST("ownership buffer validation", function()
 		local buf = buffer.create(1)
 		buffer.writeu8(buf, 0, 255) -- invalid packet type
 		local ok = pcall(function()
-			server:apply_ownership_reliable(buf, members[1] :: any, {})
+			server:apply_ownership(buf, members[1] :: any, {})
 		end)
 		-- this should NOT crash — the pcall catches the error from check_packet_type
 		CHECK(ok == true)
@@ -3517,12 +3519,12 @@ TEST("ownership buffer validation", function()
 			buffer.writeu8(garbage, i, math.random(0, 255))
 		end
 		local ok = pcall(function()
-			server:apply_ownership_reliable(garbage, members[1] :: any, {})
+			server:apply_ownership(garbage, members[1] :: any, {})
 		end)
 		CHECK(ok == true)
 
 		local ok2 = pcall(function()
-			server:apply_ownership_unreliable(garbage, members[1] :: any, {})
+			server:apply_ownership(garbage, members[1] :: any, {})
 		end)
 		CHECK(ok2 == true)
 	end)
@@ -3577,7 +3579,7 @@ TEST("ownership buffer validation", function()
 		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 42.0)
 
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		-- value should NOT have changed since server-side deserialization failed
@@ -3588,7 +3590,7 @@ TEST("ownership buffer validation", function()
 		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 42.0)
 
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		-- now it should succeed
@@ -3628,7 +3630,7 @@ TEST("ownership buffer validation", function()
 		-- collect the real buffer and replace with tampered variant reference
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
 			-- apply with empty variants (simulates tampered variant array)
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, {})
+			server:apply_ownership(ownership_buf, members[1] :: any, {})
 		end
 
 		-- value should not have changed (variant was out of bounds)
@@ -4054,7 +4056,7 @@ TEST("memory leaks", function()
 		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 999.0)
 
 		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
-			server:apply_ownership_reliable(ownership_buf, members[1] :: any, ownership_variants)
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
 		end
 
 		-- The value should NOT have changed (999 is out of range 0-100)
@@ -4397,7 +4399,6 @@ TEST("memory leaks", function()
 
 		CHECK(members[1].client.ownership_grants[c_entity] == nil)
 		CHECK(members[1].client.ownership_buffer[c_entity] == nil)
-		CHECK(members[1].client.ownership_unreliable_buffer[c_entity] == nil)
 		CHECK(members[1].world:contains(c_entity) == false)
 	end)
 end)

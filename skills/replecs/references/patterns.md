@@ -109,14 +109,20 @@ function MOVEMENT_SYSTEM() {
 
 // Client: send ownership updates at fixed rate
 function OWNERSHIP_SEND_SYSTEM() {
+  for (const [buf, variants] of client.collect_ownership()) {
+    zap.OnOwnershipReliable.Fire(buf, variants);
+  }
   for (const [buf, variants] of client.collect_ownership_unreliable()) {
     zap.OnOwnershipUnreliable.Fire(buf, variants);
   }
 }
 
-// Server: receive and apply
+// Server: receive and apply (same handler for both channels)
+zap.OnOwnershipReliable.SetCallback((player, buf, variants) => {
+  server.apply_ownership(buf, player, variants);
+});
 zap.OnOwnershipUnreliable.SetCallback((player, buf, variants) => {
-  server.apply_ownership_unreliable(buf, player, variants);
+  server.apply_ownership(buf, player, variants);
 });
 ```
 

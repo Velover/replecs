@@ -240,12 +240,7 @@ declare namespace Replecs {
       LuaTuple<[Player, buffer, defined[][] | undefined]>
     >;
 
-    apply_ownership_reliable(
-      buf: buffer,
-      player: Player,
-      all_variants?: defined[][],
-    ): void;
-    apply_ownership_unreliable(
+    apply_ownership(
       buf: buffer,
       player: Player,
       all_variants?: defined[][],
