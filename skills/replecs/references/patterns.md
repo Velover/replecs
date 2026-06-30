@@ -96,6 +96,9 @@ import { pair } from "@rbxts/jecs";
 const playerEntity = getPlayerEntity(player);
 world.set(playerEntity, pair(Replecs.Owned, Position), player);
 
+// Client: set throttle to reduce ownership update traffic
+client.set_throttle(Position, 0.1); // 10Hz instead of every frame
+
 // Client: predict movement locally
 function MOVEMENT_SYSTEM() {
   if (!client.has_ownership(playerEntity, Position)) return;
@@ -104,10 +107,12 @@ function MOVEMENT_SYSTEM() {
   const newPos = currentPos.add(velocity.mul(dt));
 
   // request_set writes locally for prediction AND buffers for server replication
+  // If throttled, only the latest value is sent when the interval elapses
   client.request_set(playerEntity, Position, newPos, true); // unreliable
 }
 
 // Client: send ownership updates at fixed rate
+// collect_ownership() flushes pending throttle buffers before collecting
 function OWNERSHIP_SEND_SYSTEM() {
   for (const [buf, variants] of client.collect_ownership()) {
     zap.OnOwnershipReliable.Fire(buf, variants);
@@ -196,6 +201,17 @@ world.set(playerEntity, Score, newScore);
 
 // The buffered value is flushed during server.collect_updates()
 // when the throttle interval has elapsed
+```
+
+### Client-side ownership throttle
+
+```ts
+// Throttle ownership updates on the client to reduce network traffic
+client.set_throttle(Position, 0.1); // 10Hz — only latest value sent
+
+// request_set still writes locally for prediction immediately
+// but the server update is buffered until the throttle interval
+client.request_set(entity, Position, newPos);
 ```
 
 ---

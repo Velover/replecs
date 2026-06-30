@@ -20,18 +20,22 @@ Server                          Client
   │    jecs.pair(Owned, Pos),     │
   │    player)                    │
   │                               │
-  │  2. Collect grants            │
-  │  for player, buf, variants    │
-  │    in server:                 │
-  │    collect_ownership_grant()  │
+  │  2a. get_full() includes      │
+  │      grants (join path)       │
+  │──── buf, vars, grant? ───────→│
+  │                               │  3a. apply_full + apply_grant
+  │                               │
+  │  2b. collect_ownership_grant()│
+  │      (ongoing, bitmask-filtered)
   │──── buf, variants ──────────→ │
-  │                               │  3. Apply grants
-  │                               │  client:apply_ownership_grant()
+  │                               │  3b. apply_ownership_grant()
   │                               │
   │                               │  4. Check & request
   │                               │  if client:has_ownership(e, Pos)
-  │                               │    client:request_set(e, Pos, v)│                               │    → sets world immediately
-│                               │    → buffers for replication  │                               │
+  │                               │    client:request_set(e, Pos, v)
+  │                               │    → sets world immediately
+  │                               │    → buffers for replication
+  │                               │
   │                               │  5. Collect updates
   │  ←── buf, variants ──────────│  for buf, variants in
   │                               │    client:collect_ownership()
@@ -64,6 +68,8 @@ When you set an `(Owned, component)` pair, the server:
 2. Marks the player as dirty in `ownership_dirty`
 3. The dirty mark causes `collect_ownership_grant()` to yield a packet for that player
 
+Ownership grants are also included in `get_full()` for the joining player. Both `get_full()` and `collect_ownership_grant()` respect bitmask visibility — only entities the player can see (based on the masking system) are included in grants.
+
 ### With Player Filtering
 
 The `Owned` component supports member filters like other components:
@@ -93,21 +99,35 @@ world.set(entity, pair(Replecs.Owned, Position), player); // re-grant
 
 ## Ownership Validation
 
-Serdes can define an `ownership_validate` function to reject invalid client updates:
+The `validator` component validates client ownership updates server-side. It is **separate from serdes** — you can use it with or without custom serialization:
 
 ```ts
-// Set serdes directly on the component entity (NOT via pair)
+// Validator only — no serdes needed, uses default variant wire encoding
+world.set(Health, Replecs.Validator, {
+	validate: (value: number) => {
+		return value >= 0 && value <= 100;
+	},
+});
+
+// Validator + serdes — custom serialization with separate validation
 world.set(Position, Replecs.Serdes, {
 	bytespan: 12,
 	serialize: /* ... */,
 	deserialize: /* ... */,
-	ownership_validate: (value: Vector3) => {
+});
+world.set(Position, Replecs.Validator, {
+	validate: (value: Vector3) => {
 		return value.Magnitude < 10000;  // anti-cheat: reject far positions
 	},
 });
+
+// Shorthand (server-only)
+server.set_validator(Health, { validate: (v) => v >= 0 && v <= 100 });
 ```
 
-If validation fails, the update is silently dropped.
+Validation is applied **after** deserialization (if serdes is present) or on the raw variant value (if no serdes). If validation fails, the update is silently dropped.
+
+Validators are **server-only** — they do not need to be set on the client and are not included in the handshake.
 
 ## Reliable vs Unreliable
 

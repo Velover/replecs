@@ -20,6 +20,7 @@ export type HandleContext = customid.HandleContext
 export type CustomId = customid.CustomId
 export type HandshakeInfo = types.HandshakeInfo
 export type Serdes = types.Serdes
+export type OwnershipValidator = types.OwnershipValidator
 export type InterpolatorConfig = interpolation.InterpolatorConfig
 export type Interpolator = interpolation.Interpolator
 
@@ -33,6 +34,8 @@ export type ReplecsLib = {
 
 	set_serdes: <T>(self: ReplecsLib, id: Component<T>, serdes: types.Serdes<T>) -> (),
 	remove_serdes: (self: ReplecsLib, id: Component) -> (),
+	set_validator: <T>(self: ReplecsLib, id: Component<T>, validator: types.OwnershipValidator<T>) -> (),
+	remove_validator: (self: ReplecsLib, id: Component) -> (),
 }
 
 type Replecs = types.Components & {
@@ -136,6 +139,18 @@ function replecs.remove_serdes(lib: ReplecsLib, id: Component)
 	end
 	if lib.client then
 		lib.client:remove_serdes(id)
+	end
+end
+
+function replecs.set_validator(lib: ReplecsLib, id: Component, validator: types.OwnershipValidator)
+	if lib.server then
+		lib.server:set_validator(id, validator)
+	end
+end
+
+function replecs.remove_validator(lib: ReplecsLib, id: Component)
+	if lib.server then
+		lib.server:remove_validator(id)
 	end
 end
 

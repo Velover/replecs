@@ -57,16 +57,12 @@ type OwnershipEntry = {
 	player: Player?,
 }
 
-type ThrottledEntityEntry = {
-	component_changes: Map<Component, any>,
-	tag_changes: Set<Component>,
-	removals: Set<Component>,
-}
-
 type ThrottleEntry = {
 	last_flush: number,
 	interval: number,
-	entities: Map<Entity, ThrottledEntityEntry>,
+	component_changes: Map<Entity, Map<Component, any>>,
+	tag_changes: Map<Entity, Set<Component>>,
+	removals: Map<Entity, Set<Component>>,
 }
 
 export type ServerImp = {
@@ -89,6 +85,8 @@ export type ServerImp = {
 
 	set_serdes: <T>(self: Server, id: Component<T>, serdes: types.Serdes<T>) -> (),
 	remove_serdes: (self: Server, id: Component) -> (),
+	set_validator: <T>(self: Server, id: Component<T>, validator: types.OwnershipValidator<T>) -> (),
+	remove_validator: (self: Server, id: Component) -> (),
 
 	collect_ownership_grant: (self: Server) -> () -> (Player, buffer, { { any } }),
 	apply_ownership: (self: Server, buf: buffer, player: Player, all_variants: { { any } }?) -> (),
@@ -119,6 +117,7 @@ export type Server = ServerImp & {
 
 	registered_custom_ids: Map<CustomId, boolean>,
 	component_serdes: Map<Component, types.Serdes>,
+	component_validators: Map<Component, types.OwnershipValidator>,
 
 	throttle: Map<Component, ThrottleEntry>,
 	ownership: Map<Entity, Map<Component, OwnershipEntry>>,
@@ -132,7 +131,7 @@ export type Server = ServerImp & {
 	get_shared_count: (self: Server) -> number,
 	register_custom_id: (self: Server, custom_id: CustomId) -> (),
 
-	get_full: (self: Server, player: Player) -> (buffer, { { any } }),
+	get_full: (self: Server, player: Player) -> (buffer, { { any } }, buffer?, { { any } }?),
 	collect_entity: (self: Server, entity: Entity) -> () -> (Player, buffer, { { any } }),
 	collect_updates: (self: Server) -> () -> (Player, buffer, { { any } }),
 	collect_unreliable: (self: Server) -> () -> (Player, buffer, { { any } }),
@@ -314,6 +313,9 @@ end
 local function QUERY_CURRENT_COMPONENTS(server: Server)
 	for component, serdes in server.world:query(server.components.serdes):iter() do
 		server.component_serdes[component] = serdes
+	end
+	for component, validator in server.world:query(server.components.validator):iter() do
+		server.component_validators[component] = validator
 	end
 	for entity, id in server.world:query(server.components.global):iter() do
 		server.global_ids[entity] = id
@@ -545,13 +547,16 @@ local function buffer_or_allocate_component_change(
 )
 	local throttle_entry = server.throttle[component]
 	if throttle_entry then
-		local entity_entry = throttle_entry.entities[entity]
-		if not entity_entry then
-			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
-			throttle_entry.entities[entity] = entity_entry
+		local entity_changes = throttle_entry.component_changes[entity]
+		if not entity_changes then
+			entity_changes = {}
+			throttle_entry.component_changes[entity] = entity_changes
 		end
-		entity_entry.component_changes[component] = value
-		entity_entry.removals[component] = nil
+		entity_changes[component] = if value == nil then NIL_COMPONENT_VALUE else value
+		local entity_removals = throttle_entry.removals[entity]
+		if entity_removals then
+			entity_removals[component] = nil
+		end
 		return
 	end
 
@@ -566,13 +571,16 @@ end
 local function _buffer_or_allocate_tag_addition(server: Server, entity: Entity, tag: Component)
 	local throttle_entry = server.throttle[tag]
 	if throttle_entry then
-		local entity_entry = throttle_entry.entities[entity]
-		if not entity_entry then
-			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
-			throttle_entry.entities[entity] = entity_entry
+		local entity_tags = throttle_entry.tag_changes[entity]
+		if not entity_tags then
+			entity_tags = {}
+			throttle_entry.tag_changes[entity] = entity_tags
 		end
-		entity_entry.tag_changes[tag] = true
-		entity_entry.removals[tag] = nil
+		entity_tags[tag] = true
+		local entity_removals = throttle_entry.removals[entity]
+		if entity_removals then
+			entity_removals[tag] = nil
+		end
 		return
 	end
 
@@ -582,14 +590,20 @@ end
 local function _buffer_or_allocate_component_removal(server: Server, entity: Entity, component: Component)
 	local throttle_entry = server.throttle[component]
 	if throttle_entry then
-		local entity_entry = throttle_entry.entities[entity]
-		if not entity_entry then
-			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
-			throttle_entry.entities[entity] = entity_entry
+		local entity_removals = throttle_entry.removals[entity]
+		if not entity_removals then
+			entity_removals = {}
+			throttle_entry.removals[entity] = entity_removals
 		end
-		entity_entry.removals[component] = true
-		entity_entry.component_changes[component] = nil
-		entity_entry.tag_changes[component] = nil
+		entity_removals[component] = true
+		local entity_changes = throttle_entry.component_changes[entity]
+		if entity_changes then
+			entity_changes[component] = nil
+		end
+		local entity_tags = throttle_entry.tag_changes[entity]
+		if entity_tags then
+			entity_tags[component] = nil
+		end
 		return
 	end
 
@@ -599,13 +613,16 @@ end
 local function _buffer_or_allocate_tag_removal(server: Server, entity: Entity, tag: Component)
 	local throttle_entry = server.throttle[tag]
 	if throttle_entry then
-		local entity_entry = throttle_entry.entities[entity]
-		if not entity_entry then
-			entity_entry = { component_changes = {}, tag_changes = {}, removals = {} }
-			throttle_entry.entities[entity] = entity_entry
+		local entity_removals = throttle_entry.removals[entity]
+		if not entity_removals then
+			entity_removals = {}
+			throttle_entry.removals[entity] = entity_removals
 		end
-		entity_entry.removals[tag] = true
-		entity_entry.tag_changes[tag] = nil
+		entity_removals[tag] = true
+		local entity_tags = throttle_entry.tag_changes[entity]
+		if entity_tags then
+			entity_tags[tag] = nil
+		end
 		return
 	end
 
@@ -622,7 +639,9 @@ local function cleanup_entity(server: Server, entity: Entity)
 
 	-- purge from throttle buffers
 	for _, throttle_entry in server.throttle do
-		throttle_entry.entities[entity] = nil
+		throttle_entry.component_changes[entity] = nil
+		throttle_entry.tag_changes[entity] = nil
+		throttle_entry.removals[entity] = nil
 	end
 
 	-- purge ownership
@@ -980,7 +999,27 @@ local function untrack_entity_component(server: Server, entity: Entity, componen
 	-- purge from throttle buffers
 	local throttle_entry = server.throttle[component]
 	if throttle_entry then
-		throttle_entry.entities[entity] = nil
+		local entity_changes = throttle_entry.component_changes[entity]
+		if entity_changes then
+			entity_changes[component] = nil
+			if next(entity_changes) == nil then
+				throttle_entry.component_changes[entity] = nil
+			end
+		end
+		local entity_tags = throttle_entry.tag_changes[entity]
+		if entity_tags then
+			entity_tags[component] = nil
+			if next(entity_tags) == nil then
+				throttle_entry.tag_changes[entity] = nil
+			end
+		end
+		local entity_removals = throttle_entry.removals[entity]
+		if entity_removals then
+			entity_removals[component] = nil
+			if next(entity_removals) == nil then
+				throttle_entry.removals[entity] = nil
+			end
+		end
 	end
 
 	-- purge ownership for this component
@@ -1438,7 +1477,7 @@ local function create_unreliable_packet_iterator(packets: { [Player]: MemberPack
 	end) :: PacketIterator
 end
 
-function server_replicator.get_full(server: Server, client: Player): (buffer, { { any } })
+function server_replicator.get_full(server: Server, client: Player): (buffer, { { any } }, buffer?, { { any } }?)
 	server_replicator.resolve_dirty(server)
 	local index = server.masking.client_indexes[client]
 	if index == nil then
@@ -1475,7 +1514,46 @@ function server_replicator.get_full(server: Server, client: Player): (buffer, { 
 		total_size += buffer.len(output)
 	end
 
-	return combine_packet_outputs(packets, total_size, PACKET_TYPES.full)
+	local full_buf, full_variants = combine_packet_outputs(packets, total_size, PACKET_TYPES.full)
+
+	-- also generate ownership grants for this player (bitmask-filtered)
+	local grant_c = cursor.new()
+	local total_grants = 0
+
+	for entity, components_map in server.ownership do
+		for component, entry in components_map do
+			if entry.player ~= client then
+				continue
+			end
+
+			local lookup = server.masking.lookups.entities[entity]
+			if not lookup then
+				continue
+			end
+			local sg = lookup.storage_group
+			if not sg.mask.bitmask:get(index) then
+				continue
+			end
+
+			-- write: component_id, entity_id (LIFO order, reads backward)
+			server_replicator.write_component_id(server, grant_c, component)
+			server_replicator.write_entity_id(server, grant_c, entity)
+			total_grants += 1
+		end
+	end
+
+	if total_grants > 0 then
+		cursor.write_vlq(grant_c, total_grants)
+		local grant_output = cursor.close(grant_c)
+		local grant_buf, grant_variants = combine_packet_outputs(
+			{ { buffer = grant_output, variants = {} } },
+			buffer.len(grant_output),
+			PACKET_TYPES.ownership_grant
+		)
+		return full_buf, full_variants, grant_buf, grant_variants
+	end
+
+	return full_buf, full_variants
 end
 
 function server_replicator.collect_entity(server: Server, entity: Entity)
@@ -1524,23 +1602,30 @@ function server_replicator.collect_updates(server: Server)
 	for component, throttle_entry in server.throttle do
 		if now - throttle_entry.last_flush >= throttle_entry.interval then
 			throttle_entry.last_flush = now
-			for entity, entity_entry in throttle_entry.entities do
-				-- deletions take priority: if a component was removed AND had pending value changes, skip the value change
-				for comp in entity_entry.removals do
+			for entity, entity_removals in throttle_entry.removals do
+				for comp in entity_removals do
 					allocate_component_removal(server, entity, comp)
 				end
-				for comp, value in entity_entry.component_changes do
-					if not entity_entry.removals[comp] then
+			end
+			for entity, entity_changes in throttle_entry.component_changes do
+				local entity_removals = throttle_entry.removals[entity]
+				for comp, value in entity_changes do
+					if not entity_removals or not entity_removals[comp] then
 						allocate_component_change(server, entity, comp, value)
 					end
 				end
-				for tag in entity_entry.tag_changes do
-					if not entity_entry.removals[tag] then
+			end
+			for entity, entity_tags in throttle_entry.tag_changes do
+				local entity_removals = throttle_entry.removals[entity]
+				for tag in entity_tags do
+					if not entity_removals or not entity_removals[tag] then
 						allocate_tag_addition(server, entity, tag)
 					end
 				end
 			end
-			table.clear(throttle_entry.entities)
+			table.clear(throttle_entry.component_changes)
+			table.clear(throttle_entry.tag_changes)
+			table.clear(throttle_entry.removals)
 		end
 	end
 
@@ -1936,9 +2021,17 @@ end
 function server_replicator.collect_ownership_grant(server: Server)
 	server_replicator.resolve_dirty(server)
 	local packets: { [Player]: MemberPackets } = {}
+	local processed: Set<Player> = {}
 
 	for player in server.ownership_dirty do
 		if not utils.is_client_valid(player) then
+			processed[player] = true
+			continue
+		end
+
+		-- skip non-activated players: leave their dirty flag so grants
+		-- are delivered after mark_player_ready activates them
+		if not server.masking:member_is_active(player) then
 			continue
 		end
 
@@ -1949,6 +2042,17 @@ function server_replicator.collect_ownership_grant(server: Server)
 		for entity, components_map in server.ownership do
 			for component, entry in components_map do
 				if entry.player ~= player then
+					continue
+				end
+
+				-- check bitmask: only send grants for entities the player can see
+				local lookup = server.masking.lookups.entities[entity]
+				if not lookup then
+					continue
+				end
+				local sg = lookup.storage_group
+				local pindex = server.masking.client_indexes[player]
+				if pindex == nil or not sg.mask.bitmask:get(pindex) then
 					continue
 				end
 
@@ -1973,9 +2077,13 @@ function server_replicator.collect_ownership_grant(server: Server)
 			total_size = buffer.len(output),
 		}
 		packets[player] = member_packets
+		processed[player] = true
 	end
 
-	table.clear(server.ownership_dirty)
+	-- only clear processed players; non-activated players stay dirty
+	for player in processed do
+		server.ownership_dirty[player] = nil
+	end
 
 	local iterated: Player? = nil
 	local function iterator()
@@ -2054,11 +2162,10 @@ local function read_serdes_value(
 			return false, nil
 		end
 
-		if serdes.ownership_validate then
-			if not serdes.ownership_validate(value) then
-				common.log_warn(`ownership validation failed for component {common.log_component(server.world, component)}`)
-				return false, nil
-			end
+		local validator = server.component_validators[component]
+		if validator and not validator.validate(value) then
+			common.log_warn(`ownership validation failed for component {common.log_component(server.world, component)}`)
+			return false, nil
 		end
 
 		return true, value
@@ -2076,7 +2183,15 @@ local function read_serdes_value(
 			)
 			return false, nil
 		end
-		return true, variants[variant_id]
+
+		local value = variants[variant_id]
+		local validator = server.component_validators[component]
+		if validator and not validator.validate(value) then
+			common.log_warn(`ownership validation failed for component {common.log_component(server.world, component)}`)
+			return false, nil
+		end
+
+		return true, value
 	end
 end
 
@@ -2303,7 +2418,9 @@ function server_replicator.stop_networked(server: Server, entity: Entity, keep: 
 
 	-- purge from throttle buffers
 	for _, throttle_entry in server.throttle do
-		throttle_entry.entities[entity] = nil
+		throttle_entry.component_changes[entity] = nil
+		throttle_entry.tag_changes[entity] = nil
+		throttle_entry.removals[entity] = nil
 	end
 
 	-- purge ownership
@@ -2444,6 +2561,14 @@ function server_replicator.remove_serdes(server: Server, component: Component)
 	server.is_shared_dirty = true
 end
 
+function server_replicator.set_validator(server: Server, component: Component, validator: types.OwnershipValidator)
+	server.component_validators[component] = validator
+end
+
+function server_replicator.remove_validator(server: Server, component: Component)
+	server.component_validators[component] = nil
+end
+
 local function check_created(server: Server)
 	if server.inited == true then
 		warn "attempted to init a server twice"
@@ -2538,7 +2663,9 @@ function server_replicator.init(server: Server, wrd: World?)
 			server.throttle[component] = {
 				last_flush = os.clock(),
 				interval = interval or 1 / 20,
-				entities = {},
+				component_changes = {},
+				tag_changes = {},
+				removals = {},
 			}
 		end))
 		hook(HOOK_CHANGED(world, LISTEN_RELATION(components.throttle), function(entity, id, interval)
@@ -2553,15 +2680,19 @@ function server_replicator.init(server: Server, wrd: World?)
 			-- flush any pending buffer before un-throttling
 			local entry = server.throttle[component]
 			if entry then
-				for buffered_entity, entity_entry in entry.entities do
-					for comp, value in entity_entry.component_changes do
+				for buffered_entity, entity_removals in entry.removals do
+					for comp in entity_removals do
+						allocate_component_removal(server, buffered_entity, comp)
+					end
+				end
+				for buffered_entity, entity_changes in entry.component_changes do
+					for comp, value in entity_changes do
 						allocate_component_change(server, buffered_entity, comp, value)
 					end
-					for tag in entity_entry.tag_changes do
+				end
+				for buffered_entity, entity_tags in entry.tag_changes do
+					for tag in entity_tags do
 						allocate_tag_addition(server, buffered_entity, tag)
-					end
-					for comp in entity_entry.removals do
-						allocate_component_removal(server, buffered_entity, comp)
 					end
 				end
 				server.throttle[component] = nil
@@ -2641,6 +2772,16 @@ function server_replicator.init(server: Server, wrd: World?)
 	end))
 	hook(HOOK_REMOVED(world, components.serdes, function(component)
 		server_replicator.remove_serdes(server, component)
+	end))
+
+	hook(HOOK_ADDED(world, components.validator, function(component, _, validator)
+		server_replicator.set_validator(server, component, validator)
+	end))
+	hook(HOOK_CHANGED(world, components.validator, function(component, _, validator)
+		server_replicator.set_validator(server, component, validator)
+	end))
+	hook(HOOK_REMOVED(world, components.validator, function(component)
+		server_replicator.remove_validator(server, component)
 	end))
 
 	hook(HOOK_REMOVED(world, components.__alive_tracking__, function(entity)
@@ -2803,6 +2944,7 @@ local function create(world: World?, components: types.Components?): Server
 	self.custom_ids = {}
 	self.registered_custom_ids = {}
 	self.component_serdes = {}
+	self.component_validators = {}
 	self.throttle = {}
 	self.ownership = {}
 	self.ownership_dirty = {}

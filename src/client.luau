@@ -8,6 +8,8 @@ local utils = require "./utils"
 
 local cursor = utils.cursor
 
+local NIL_OWNERSHIP_VALUE = newproxy()
+
 type Cursor = utils.Cursor
 type CustomId = customid.CustomId
 
@@ -72,6 +74,7 @@ type CustomIdMap = { [Entity]: CustomId | Entity }
 export type ClientImp = {
 	set_serdes: <T>(self: Client, id: Component<T>, serdes: types.Serdes<T>) -> (),
 	remove_serdes: (self: Client, id: Component) -> (),
+	set_throttle: (self: Client, component: Component, interval: number) -> (),
 }
 
 export type Client = ClientImp & {
@@ -95,8 +98,12 @@ export type Client = ClientImp & {
 	component_serdes: Map<Component, types.Serdes>,
 
 	ownership_grants: Map<Entity, Map<Component, boolean>>,
-	ownership_buffer: Map<Entity, Map<Component, { value: any }>>,
-	ownership_unreliable_buffer: Map<Entity, Map<Component, { value: any }>>,
+	ownership_buffer: Map<Entity, Map<Component, any>>,
+	ownership_unreliable_buffer: Map<Entity, Map<Component, any>>,
+	ownership_throttle: Map<
+		Component,
+		{ last_flush: number, interval: number, values: Map<Entity, any>, unreliable: Map<Entity, boolean> }
+	>,
 
 	init: (self: Client, world: World?) -> (),
 	destroy: (self: Client) -> (),
@@ -1591,18 +1598,26 @@ function client_replicator.request_set(
 	-- set locally for immediate client-side prediction
 	WORLD_SET(client.world, entity, component, value)
 
+	-- check throttle: buffer instead of sending immediately
+	local throttle_entry = client.ownership_throttle[component]
+	if throttle_entry then
+		throttle_entry.values[entity] = if value == nil then NIL_OWNERSHIP_VALUE else value
+		throttle_entry.unreliable[entity] = unreliable == true
+		return
+	end
+
 	local target_buffer = if unreliable then client.ownership_unreliable_buffer else client.ownership_buffer
 	local entity_buffer = target_buffer[entity]
 	if not entity_buffer then
 		entity_buffer = {}
 		target_buffer[entity] = entity_buffer
 	end
-	entity_buffer[component] = { value = value }
+	entity_buffer[component] = if value == nil then NIL_OWNERSHIP_VALUE else value
 end
 
 local function collect_ownership_from_buffer(
 	client: Client,
-	source_buffer: Map<Entity, Map<Component, { value: any }>>,
+	source_buffer: Map<Entity, Map<Component, any>>,
 	packet_type: number
 ): () -> (buffer, { { any } })
 	client_replicator.resolve_dirty(client)
@@ -1614,9 +1629,10 @@ local function collect_ownership_from_buffer(
 		local variants = {} :: Array<{ any }>
 		local total_entries = 0
 
-		for component, entry in components_map do
+		for component, raw_value in components_map do
+			local value = if raw_value == NIL_OWNERSHIP_VALUE then nil else raw_value
 			-- write in LIFO order: value first, component_id, entity_id last
-			client_replicator.write_component_value(client, c, component, entry.value, variants)
+			client_replicator.write_component_value(client, c, component, value, variants)
 			client_replicator.write_component_id(client, c, component)
 			client_replicator.write_entity_id(client, c, entity)
 			total_entries += 1
@@ -1663,11 +1679,35 @@ local function collect_ownership_from_buffer(
 	end
 end
 
+local function flush_ownership_throttle(client: Client)
+	local now = os.clock()
+	for component, throttle_entry in client.ownership_throttle do
+		if now - throttle_entry.last_flush >= throttle_entry.interval then
+			throttle_entry.last_flush = now
+			for entity, raw_value in throttle_entry.values do
+				local target_buffer = if throttle_entry.unreliable[entity]
+					then client.ownership_unreliable_buffer
+					else client.ownership_buffer
+				local entity_buffer = target_buffer[entity]
+				if not entity_buffer then
+					entity_buffer = {}
+					target_buffer[entity] = entity_buffer
+				end
+				entity_buffer[component] = raw_value
+			end
+			table.clear(throttle_entry.values)
+			table.clear(throttle_entry.unreliable)
+		end
+	end
+end
+
 function client_replicator.collect_ownership(client: Client)
+	flush_ownership_throttle(client)
 	return collect_ownership_from_buffer(client, client.ownership_buffer, PACKET_TYPES.ownership)
 end
 
 function client_replicator.collect_ownership_unreliable(client: Client)
+	flush_ownership_throttle(client)
 	return collect_ownership_from_buffer(client, client.ownership_unreliable_buffer, PACKET_TYPES.ownership)
 end
 
@@ -1679,6 +1719,15 @@ end
 function client_replicator.remove_serdes(client: Client, component: Component)
 	client.component_serdes[component] = nil
 	client.is_shared_dirty = true
+end
+
+function client_replicator.set_throttle(client: Client, component: Component, interval: number)
+	client.ownership_throttle[component] = {
+		last_flush = os.clock(),
+		interval = interval,
+		values = {},
+		unreliable = {},
+	}
 end
 
 -- TODO: Deserialize pairs in client
@@ -1722,6 +1771,10 @@ function client_replicator.init(client: Client, wrd: World?)
 		client.ownership_grants[entity] = nil
 		client.ownership_buffer[entity] = nil
 		client.ownership_unreliable_buffer[entity] = nil
+		for _, throttle_entry in client.ownership_throttle do
+			throttle_entry.values[entity] = nil
+			throttle_entry.unreliable[entity] = nil
+		end
 	end))
 
 	hook(HOOK_ADDED(world, components.serdes, function(component, _, serdes)
@@ -1962,6 +2015,7 @@ local function create(world: World?, components: types.Components?): Client
 	self.ownership_grants = {}
 	self.ownership_buffer = {}
 	self.ownership_unreliable_buffer = {}
+	self.ownership_throttle = {}
 
 	self.addition_hooks = {}
 	self.network_hooks = {

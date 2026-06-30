@@ -7,15 +7,17 @@ declare namespace Replecs {
         includes_variants?: false;
         serialize: (value: T) => buffer;
         deserialize: (buffer: buffer) => T;
-        ownership_validate?: (raw_value: T) => boolean;
       }
     | {
         bytespan?: number;
         includes_variants: true;
         serialize: (value: T) => LuaTuple<[buffer, defined[] | undefined]>;
         deserialize: (buffer: buffer, blobs: defined[] | undefined) => T;
-        ownership_validate?: (raw_value: T) => boolean;
       };
+
+  export interface OwnershipValidator<T = any> {
+    validate: (value: T) => boolean;
+  }
 
   type MemberFilterMap = Map<Player, boolean>;
   type MemberFilter = Player | MemberFilterMap | undefined;
@@ -69,6 +71,7 @@ declare namespace Replecs {
     owned: Entity<MemberFilter>;
 
     serdes: Entity<SerdesTable>;
+    validator: Entity<OwnershipValidator>;
     custom: Entity;
     custom_handler: Entity<(value: any) => Entity>;
     global: Entity<number>;
@@ -82,6 +85,7 @@ declare namespace Replecs {
     Owned: Entity<MemberFilter>;
 
     Serdes: Entity<SerdesTable>;
+    Validator: Entity<OwnershipValidator>;
     Custom: Entity;
     CustomHandler: Entity<(value: any) => Entity>;
     Global: Entity<number>;
@@ -93,9 +97,15 @@ declare namespace Replecs {
       serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
+    set_validator<T extends Id>(
+      component: T,
+      validator: OwnershipValidator<InferComponent<T>>,
+    ): void;
+    remove_validator(component: Id): void;
+    set_throttle(component: Entity, interval: number): void;
   }
 
-  export interface Client {
+  export interface Client extends ClientImp {
     world: World;
     inited?: boolean;
 
@@ -251,7 +261,9 @@ declare namespace Replecs {
 
     register_custom_id(custom_id: CustomId): void;
 
-    get_full(player: Player): LuaTuple<[buffer, defined[][] | undefined]>;
+    get_full(
+      player: Player,
+    ): LuaTuple<[buffer, defined[][] | undefined, buffer?, defined[][]?]>;
     collect_entity(
       entity: Entity,
     ): IterableFunction<LuaTuple<[Player, buffer, defined[][] | undefined]>>;

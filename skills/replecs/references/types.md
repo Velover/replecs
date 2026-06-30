@@ -31,16 +31,24 @@ type SerdesTable<T = any> =
       includes_variants?: false;
       serialize: (value: T) => buffer;
       deserialize: (buffer: buffer) => T;
-      ownership_validate?: (raw_value: T) => boolean;
     }
   | {
       bytespan?: number;
       includes_variants: true;
       serialize: (value: T) => LuaTuple<[buffer, defined[] | undefined]>;
       deserialize: (buffer: buffer, blobs: defined[] | undefined) => T;
-      ownership_validate?: (raw_value: T) => boolean;
     };
 ```
+
+## Ownership Validator
+
+```ts
+interface OwnershipValidator<T = any> {
+  validate: (value: T) => boolean;
+}
+```
+
+Separate from serdes — validates client ownership updates server-side. Works with or without serdes. Server-only.
 
 ## Components
 
@@ -55,6 +63,7 @@ interface Components {
   owned: Entity<MemberFilter>;
 
   serdes: Entity<SerdesTable>;
+  validator: Entity<OwnershipValidator>;
   custom: Entity;
   custom_handler: Entity<(value: any) => Entity>;
   global: Entity<number>;
@@ -68,6 +77,7 @@ interface Components {
   Owned: Entity<MemberFilter>;
 
   Serdes: Entity<SerdesTable>;
+  Validator: Entity<OwnershipValidator>;
   Custom: Entity;
   CustomHandler: Entity<(value: any) => Entity>;
   Global: Entity<number>;

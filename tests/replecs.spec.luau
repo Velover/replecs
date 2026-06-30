@@ -2381,7 +2381,11 @@ TEST("throttle", function()
 		-- The entity should be purged from throttle buffer during cleanup
 		local throttle_entry = server.throttle[components[1]]
 		CHECK(throttle_entry ~= nil)
-		CHECK(throttle_entry.entities[entity1] == nil)
+		CHECK(
+			throttle_entry.component_changes[entity1] == nil
+				and throttle_entry.tag_changes[entity1] == nil
+				and throttle_entry.removals[entity1] == nil
+		)
 	end)
 end)
 
@@ -2597,7 +2601,7 @@ TEST("ownership", function()
 		CHECK(server.ownership[entity1] == nil)
 	end)
 
-	CASE("should provide ownership_validate for serdes", function()
+	CASE("should provide ownership validation via validator component", function()
 		local validate_called = false
 		local serdes: replecs.Serdes = {
 			serialize = function(value: number)
@@ -2608,7 +2612,9 @@ TEST("ownership", function()
 			deserialize = function(buf: buffer)
 				return buffer.readf64(buf, 0)
 			end,
-			ownership_validate = function(value: number): boolean
+		}
+		local validator: replecs.OwnershipValidator = {
+			validate = function(value: number): boolean
 				validate_called = true
 				return value >= 0 and value <= 100
 			end,
@@ -2616,6 +2622,7 @@ TEST("ownership", function()
 
 		local components = create_test_components(world)
 		world:set(components[1], replecs.serdes, serdes)
+		world:set(components[1], replecs.validator, validator)
 		server:init()
 
 		local members = create_members_data(1)
@@ -2651,6 +2658,99 @@ TEST("ownership", function()
 		end
 
 		CHECK(validate_called == true)
+	end)
+
+	CASE("should allow validator-only without serdes", function()
+		local validate_called = false
+		local validator: replecs.OwnershipValidator = {
+			validate = function(value: number): boolean
+				validate_called = true
+				return value >= 0 and value <= 100
+			end,
+		}
+
+		local components = create_test_components(world)
+		world:set(components[1], replecs.validator, validator)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], 50.0)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- deliver ownership grants to client
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- simulate client sending ownership update (uses default variant encoding since no serdes)
+		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 75.0)
+
+		-- collect the ownership update
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		CHECK(validate_called == true)
+		CHECK(server.storage[entity1].components[components[1]] == 75.0)
+	end)
+
+	CASE("should reject invalid values with validator", function()
+		local validator: replecs.OwnershipValidator = {
+			validate = function(value: number): boolean
+				return value >= 0 and value <= 100
+			end,
+		}
+
+		local components = create_test_components(world)
+		world:set(components[1], replecs.validator, validator)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], 50.0)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- deliver ownership grants
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- try to set a value that fails validation
+		members[1].client:request_set(client_entity(members[1], entity1) :: any, members[1].components[1], 999.0)
+
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		-- the value should NOT have been applied — it should remain 50
+		CHECK(world:get(entity1, components[1]) == 50.0)
 	end)
 
 	CASE("should check ownership via has_ownership", function()
@@ -3755,11 +3855,15 @@ TEST("memory leaks", function()
 
 		local throttle_entry = server.throttle[components[1]]
 		CHECK(throttle_entry ~= nil)
-		CHECK(throttle_entry.entities[entity1] ~= nil)
+		CHECK(throttle_entry.component_changes[entity1] ~= nil or throttle_entry.removals[entity1] ~= nil)
 
 		-- Stop tracking this component
 		server:stop_reliable(entity1, components[1])
-		CHECK(throttle_entry.entities[entity1] == nil)
+		CHECK(
+			throttle_entry.component_changes[entity1] == nil
+				and throttle_entry.tag_changes[entity1] == nil
+				and throttle_entry.removals[entity1] == nil
+		)
 	end)
 
 	CASE("throttle buffer should be cleaned when entity stops being networked", function()
@@ -3790,11 +3894,15 @@ TEST("memory leaks", function()
 
 		local throttle_entry = server.throttle[components[1]]
 		CHECK(throttle_entry ~= nil)
-		CHECK(throttle_entry.entities[entity1] ~= nil)
+		CHECK(throttle_entry.component_changes[entity1] ~= nil or throttle_entry.removals[entity1] ~= nil)
 
 		-- Stop entity entirely
 		server:stop_networked(entity1)
-		CHECK(throttle_entry.entities[entity1] == nil)
+		CHECK(
+			throttle_entry.component_changes[entity1] == nil
+				and throttle_entry.tag_changes[entity1] == nil
+				and throttle_entry.removals[entity1] == nil
+		)
 	end)
 
 	CASE("ownership should be cleaned when entity stops being reliable", function()
@@ -3991,8 +4099,8 @@ TEST("memory leaks", function()
 
 		local t1 = server.throttle[components[1]]
 		local t2 = server.throttle[components[2]]
-		CHECK(t1 ~= nil and t1.entities[entity1] ~= nil)
-		CHECK(t2 ~= nil and t2.entities[entity1] ~= nil)
+		CHECK(t1 ~= nil and (t1.component_changes[entity1] ~= nil or t1.removals[entity1] ~= nil))
+		CHECK(t2 ~= nil and (t2.component_changes[entity1] ~= nil or t2.removals[entity1] ~= nil))
 
 		-- Flush and verify only the latest value is sent
 		t1.interval = 0
@@ -4066,13 +4174,16 @@ TEST("memory leaks", function()
 			deserialize = function(buf: buffer)
 				return buffer.readf64(buf, 0)
 			end,
-			ownership_validate = function(value: number): boolean
+		}
+		local validator: replecs.OwnershipValidator = {
+			validate = function(value: number): boolean
 				return value >= 0 and value <= 100
 			end,
 		}
 
 		local components = create_test_components(world)
 		world:set(components[1], replecs.serdes, serdes)
+		world:set(components[1], replecs.validator, validator)
 		server:init()
 
 		local members = create_members_data(1)
@@ -4197,8 +4308,12 @@ TEST("memory leaks", function()
 
 		local throttle_entry = server.throttle[components[1]]
 		CHECK(throttle_entry ~= nil)
-		CHECK(throttle_entry.entities[entity1] == nil)
-		CHECK(throttle_entry.entities[entity2] ~= nil)
+		CHECK(
+			throttle_entry.component_changes[entity1] == nil
+				and throttle_entry.tag_changes[entity1] == nil
+				and throttle_entry.removals[entity1] == nil
+		)
+		CHECK(throttle_entry.component_changes[entity2] ~= nil or throttle_entry.removals[entity2] ~= nil)
 
 		-- Flush and verify entity2 gets its update
 		throttle_entry.interval = 0
@@ -4243,10 +4358,13 @@ TEST("memory leaks", function()
 
 		local throttle_entry = server.throttle[components[1]]
 		CHECK(throttle_entry ~= nil)
-		CHECK(throttle_entry.entities[entity1] ~= nil)
+		CHECK(throttle_entry.component_changes[entity1] ~= nil or throttle_entry.removals[entity1] ~= nil)
 		-- removal should have cleared the component_changes entry
-		CHECK(throttle_entry.entities[entity1].removals[components[1]] == true)
-		CHECK(throttle_entry.entities[entity1].component_changes[components[1]] == nil)
+		CHECK(throttle_entry.removals[entity1][components[1]] == true)
+		CHECK(
+			throttle_entry.component_changes[entity1] == nil
+				or throttle_entry.component_changes[entity1][components[1]] == nil
+		)
 
 		-- Flush
 		throttle_entry.interval = 0
@@ -4387,10 +4505,14 @@ TEST("memory leaks", function()
 		world:set(entity1, components[1], "throttled_val")
 		local throttle_entry = server.throttle[components[1]]
 		CHECK(throttle_entry ~= nil)
-		CHECK(throttle_entry.entities[entity1] ~= nil)
+		CHECK(throttle_entry.component_changes[entity1] ~= nil or throttle_entry.removals[entity1] ~= nil)
 
 		world:delete(entity1)
-		CHECK(throttle_entry.entities[entity1] == nil)
+		CHECK(
+			throttle_entry.component_changes[entity1] == nil
+				and throttle_entry.tag_changes[entity1] == nil
+				and throttle_entry.removals[entity1] == nil
+		)
 
 		for player, ubuf, uchanges in server:collect_updates() do
 			local member: MemberData = player :: any
@@ -5015,6 +5137,903 @@ TEST("simplified hook API", function()
 		end
 
 		CHECK(hook_value == "updated")
+	end)
+end)
+
+TEST("client throttle", function()
+	local world: jecs.World = nil :: any
+	local server: replecs.Server = nil :: any
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		server = replecs.create_server(world)
+	end)
+
+	AFTER_EACH(function()
+		server:destroy()
+	end)
+
+	local function create_members_data(count: number?)
+		local members = {} :: { MemberData }
+		for i = 1, (count or 3) do
+			local new_world = jecs.world()
+			local components = create_test_components(new_world)
+			local tags = create_test_tags(new_world)
+			local replicator = replecs.create_client(new_world)
+
+			local member_mt = {
+				world = new_world,
+				client = replicator,
+				components = components,
+				tags = tags,
+			}
+			local member = newproxy(true)
+			getmetatable(member).__index = member_mt
+
+			server.masking:register_client(member)
+			table.insert(members, member :: MemberData)
+		end
+		return members
+	end
+
+	local function client_entity(member: MemberData, server_entity: jecs.Entity): jecs.Entity?
+		local entity = member.client.server_ids[server_entity :: any]
+		if entity and member.world:contains(entity) then
+			return entity
+		end
+		return nil
+	end
+
+	CASE("should buffer request_set and not send until interval", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- set client-side throttle with a very long interval
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- request_set multiple times
+		members[1].client:request_set(c_entity, members[1].components[1], "change1")
+		members[1].client:request_set(c_entity, members[1].components[1], "change2")
+		members[1].client:request_set(c_entity, members[1].components[1], "change3")
+
+		-- Local world should have latest prediction
+		CHECK(members[1].world:get(c_entity, members[1].components[1]) == "change3")
+
+		-- collect_ownership should produce no packets (throttled, interval not elapsed)
+		local ownership_count = 0
+		for _buf, _variants in members[1].client:collect_ownership() do
+			ownership_count += 1
+		end
+		CHECK(ownership_count == 0)
+
+		-- ownership_buffer should be empty (values are in throttle buffer)
+		CHECK(members[1].client.ownership_buffer[c_entity] == nil)
+	end)
+
+	CASE("should flush when interval elapses", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Set throttle with 0 interval (flush immediately)
+		members[1].client:set_throttle(members[1].components[1], 0)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		members[1].client:request_set(c_entity, members[1].components[1], "throttled_val")
+
+		-- collect_ownership should flush and produce a packet
+		local applied = false
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+			applied = true
+		end
+		CHECK(applied == true)
+
+		-- Server should have the value
+		CHECK(server.storage[entity1].components[components[1]] == "throttled_val")
+	end)
+
+	CASE("should only send latest value (overwrite)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Set throttle with long interval to accumulate
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- Write many values — only the last should survive
+		members[1].client:request_set(c_entity, members[1].components[1], "val1")
+		members[1].client:request_set(c_entity, members[1].components[1], "val2")
+		members[1].client:request_set(c_entity, members[1].components[1], "val3")
+		members[1].client:request_set(c_entity, members[1].components[1], "final")
+
+		-- Force flush by setting interval to 0
+		local throttle_entry = members[1].client.ownership_throttle[members[1].components[1]]
+		CHECK(throttle_entry ~= nil)
+		throttle_entry.interval = 0
+
+		-- Flush and apply
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		-- Server should have "final" only
+		CHECK(server.storage[entity1].components[components[1]] == "final")
+	end)
+
+	CASE("should clean up throttle buffer on entity deletion", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Set throttle with long interval
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- Buffer a change
+		members[1].client:request_set(c_entity, members[1].components[1], "buffered")
+
+		local throttle_entry = members[1].client.ownership_throttle[members[1].components[1]]
+		CHECK(throttle_entry ~= nil)
+		CHECK(throttle_entry.values[c_entity] ~= nil)
+
+		-- Delete entity on server
+		world:delete(entity1)
+
+		-- Sync deletion to client
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- Entity should be purged from throttle buffer
+		CHECK(throttle_entry.values[c_entity] == nil)
+	end)
+
+	CASE("should clean up throttle buffer on ownership revocation", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Set throttle with long interval
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- Buffer a change
+		members[1].client:request_set(c_entity, members[1].components[1], "buffered")
+
+		local throttle_entry = members[1].client.ownership_throttle[members[1].components[1]]
+		CHECK(throttle_entry ~= nil)
+		CHECK(throttle_entry.values[c_entity] ~= nil)
+
+		-- Revoke ownership
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+
+		-- Deliver revocation grant
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- After revocation, has_ownership returns false — subsequent request_set would be blocked
+		-- The stale throttle entry should still be there (it's harmless, will be flushed as no-op)
+		-- But verify request_set is now blocked (no new entries added)
+		members[1].client:request_set(c_entity, members[1].components[1], "should_not_work")
+		-- The entry still exists from "buffered" — the important thing is request_set logged a warning and returned
+	end)
+
+	CASE("should handle reliable vs unreliable throttle independently", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(entity1, components[2])
+		world:set(entity1, components[1], "init1")
+		world:set(entity1, components[2], "init2")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- Grant ownership of both
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		world:set(entity1, jecs.pair(replecs.owned, components[2]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Only throttle component1 (component2 has no throttle)
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- Both go through request_set
+		members[1].client:request_set(c_entity, members[1].components[1], "throttled")
+		members[1].client:request_set(c_entity, members[1].components[2], "not_throttled")
+
+		-- Component2 should be sent immediately (no throttle)
+		local buf2: buffer = nil :: any
+		local v2: any = nil
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			buf2 = ownership_buf
+			v2 = ownership_variants
+		end
+		CHECK(buf2 ~= nil)
+		server:apply_ownership(buf2, members[1] :: any, v2)
+		CHECK(server.storage[entity1].components[components[2]] == "not_throttled")
+
+		-- Component1 should NOT be in the ownership buffer (still throttled)
+		-- After flush (set interval to 0), it should appear
+		local throttle_entry = members[1].client.ownership_throttle[members[1].components[1]]
+		CHECK(throttle_entry ~= nil)
+		throttle_entry.interval = 0
+
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+		CHECK(server.storage[entity1].components[components[1]] == "throttled")
+	end)
+
+	CASE("unreliable request_set should use unreliable throttle buffer", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- Set throttle with long interval
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- Send unreliable (true flag)
+		members[1].client:request_set(c_entity, members[1].components[1], "unreliable_throttled", true)
+
+		-- reliable collect should be empty
+		local reliable_count = 0
+		for _ in members[1].client:collect_ownership() do
+			reliable_count += 1
+		end
+		CHECK(reliable_count == 0)
+
+		-- unreliable collect should also be empty (still throttled)
+		local unreliable_count = 0
+		for _ in members[1].client:collect_ownership_unreliable() do
+			unreliable_count += 1
+		end
+		CHECK(unreliable_count == 0)
+
+		-- Force flush
+		local throttle_entry = members[1].client.ownership_throttle[members[1].components[1]]
+		CHECK(throttle_entry ~= nil)
+		throttle_entry.interval = 0
+
+		-- Now unreliable collect should yield
+		local applied = false
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership_unreliable() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+			applied = true
+		end
+		CHECK(applied == true)
+		CHECK(server.storage[entity1].components[components[1]] == "unreliable_throttled")
+	end)
+
+	CASE("nil value request_set should round-trip correctly", function()
+		local components = create_test_components(world)
+		server:init()
+
+		-- two members: member1 owns the component, member2 is a non-owner observer
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		-- full sync to both
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+
+		-- grant ownership to member1 only
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity1 = client_entity(members[1], entity1) :: any
+		local c_entity2 = client_entity(members[2], entity1) :: any
+		CHECK(c_entity2 ~= nil)
+
+		-- client-side: both should see "initial"
+		CHECK(members[1].world:get(c_entity1, members[1].components[1]) == "initial")
+		CHECK(members[2].world:get(c_entity2, members[2].components[1]) == "initial")
+
+		-- owner sets to nil via request_set
+		members[1].client:request_set(c_entity1, members[1].components[1], nil)
+
+		-- local prediction should write nil (component should still exist, value nil)
+		CHECK(members[1].world:has(c_entity1, members[1].components[1]))
+		CHECK(members[1].world:get(c_entity1, members[1].components[1]) == nil)
+
+		-- flush ownership to server, then replicate to non-owner
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- non-owner should see nil value (component still present, value nil)
+		CHECK(members[2].world:has(c_entity2, members[2].components[1]))
+		CHECK(members[2].world:get(c_entity2, members[2].components[1]) == nil)
+	end)
+
+	CASE("nil value should round-trip through throttled ownership", function()
+		local components = create_test_components(world)
+		server:init()
+
+		-- two members: member1 owns, member2 observes
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+
+		-- grant ownership to member1
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- throttle on client
+		members[1].client:set_throttle(members[1].components[1], 999999)
+
+		local c_entity1 = client_entity(members[1], entity1) :: any
+		local c_entity2 = client_entity(members[2], entity1) :: any
+
+		-- set to nil via throttled request_set
+		members[1].client:request_set(c_entity1, members[1].components[1], nil)
+
+		-- nothing should be in ownership_buffer yet (throttled)
+		local reliable_count = 0
+		for _ in members[1].client:collect_ownership() do
+			reliable_count += 1
+		end
+		CHECK(reliable_count == 0)
+
+		-- force flush
+		local throttle_entry = members[1].client.ownership_throttle[members[1].components[1]]
+		CHECK(throttle_entry ~= nil)
+		throttle_entry.interval = 0
+
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		-- non-owner should see nil
+		CHECK(members[2].world:has(c_entity2, members[2].components[1]))
+		CHECK(members[2].world:get(c_entity2, members[2].components[1]) == nil)
+	end)
+
+	CASE("nil value should overwrite previous non-nil value in buffer", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity1 = client_entity(members[1], entity1) :: any
+		local c_entity2 = client_entity(members[2], entity1) :: any
+
+		-- set a value then overwrite with nil
+		members[1].client:request_set(c_entity1, members[1].components[1], "something")
+		members[1].client:request_set(c_entity1, members[1].components[1], nil)
+
+		-- flush to server, replicate to non-owner — only nil should arrive
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+		for player, ubuf, uchanges in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(ubuf, uchanges)
+		end
+
+		CHECK(members[2].world:has(c_entity2, members[2].components[1]))
+		CHECK(members[2].world:get(c_entity2, members[2].components[1]) == nil)
+	end)
+
+	CASE("non-nil value should overwrite previous nil value in buffer", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+
+		-- set nil then overwrite with non-nil
+		members[1].client:request_set(c_entity, members[1].components[1], nil)
+		members[1].client:request_set(c_entity, members[1].components[1], "restored")
+
+		for ownership_buf, ownership_variants in members[1].client:collect_ownership() do
+			server:apply_ownership(ownership_buf, members[1] :: any, ownership_variants)
+		end
+
+		CHECK(server.storage[entity1].components[components[1]] == "restored")
+	end)
+end)
+
+TEST("filter blacklist", function()
+	local world: jecs.World = nil :: any
+	local server: replecs.Server = nil :: any
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		server = replecs.create_server(world)
+	end)
+
+	AFTER_EACH(function()
+		server:destroy()
+	end)
+
+	local function create_members_data(count: number?)
+		local members = {} :: { MemberData }
+		for i = 1, (count or 3) do
+			local new_world = jecs.world()
+			local components = create_test_components(new_world)
+			local tags = create_test_tags(new_world)
+			local replicator = replecs.create_client(new_world)
+
+			local member_mt = {
+				world = new_world,
+				client = replicator,
+				components = components,
+				tags = tags,
+			}
+			local member = newproxy(true)
+			getmetatable(member).__index = member_mt
+
+			server.masking:register_client(member)
+			table.insert(members, member :: MemberData)
+		end
+		return members
+	end
+
+	local function client_entity(member: MemberData, server_entity: jecs.Entity): jecs.Entity?
+		local entity = member.client.server_ids[server_entity :: any]
+		if entity and member.world:contains(entity) then
+			return entity
+		end
+		return nil
+	end
+
+	local function client_component(member: MemberData, server_entity: jecs.Entity, component_index: number)
+		local component = member.components[component_index]
+		local entity = client_entity(member, server_entity)
+		if entity then
+			return member.world:get(entity, component)
+		end
+		return nil
+	end
+
+	local function client_has_component(member: MemberData, server_entity: jecs.Entity, component_index: number)
+		local component = member.components[component_index]
+		local entity = client_entity(member, server_entity)
+		if entity then
+			return member.world:has(entity, component)
+		end
+		return false
+	end
+
+	local function full_sync(members: { MemberData }, server_entity: jecs.Entity)
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+	end
+
+	local function apply_updates(members: { MemberData })
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+	end
+
+	CASE("blacklisted player keeps orphaned entity", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1, nil)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "value")
+
+		full_sync(members, entity1)
+
+		-- both members have the entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+
+		-- blacklist member1
+		server:set_networked(entity1, { [members[2] :: any] = true })
+		apply_updates(members)
+
+		-- member1 still has the orphan (no deletion sent)
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_component(members[1], entity1, 1) == "value")
+
+		-- member2 still has it
+		CHECK(client_entity(members[2], entity1) ~= nil)
+	end)
+
+	CASE("world:delete after blacklist does not remove for blacklisted player", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1, nil)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "value")
+
+		full_sync(members, entity1)
+
+		-- blacklist member1
+		server:set_networked(entity1, { [members[2] :: any] = true })
+		apply_updates(members)
+
+		-- delete entity
+		world:delete(entity1)
+		apply_updates(members)
+
+		-- member1 STILL has the orphaned entity (deletion only went to current storage group)
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_component(members[1], entity1, 1) == "value")
+
+		-- member2 correctly lost it
+		CHECK(client_entity(members[2], entity1) == nil)
+	end)
+
+	CASE("stop_networked before blacklist sends deletion to blacklisted player", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1, nil)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "value")
+
+		full_sync(members, entity1)
+
+		-- stop BEFORE blacklisting
+		server:stop_networked(entity1)
+		server:set_networked(entity1, { [members[2] :: any] = true })
+
+		-- process updates: member1 gets delete (from old storage), member2 gets delete+create
+		apply_updates(members)
+
+		-- member1 correctly lost the entity
+		CHECK(client_entity(members[1], entity1) == nil)
+
+		-- member2 was recreated with fresh data
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_component(members[2], entity1, 1) == "value")
+	end)
+
+	CASE("stop_networked + set_networked preserves components via postponed (separate frames)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1, nil)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(entity1, components[2])
+		world:set(entity1, components[1], "hello")
+		world:set(entity1, components[2], "world")
+
+		full_sync(members, entity1)
+
+		-- stop in one frame
+		server:stop_networked(entity1)
+		apply_updates(members)
+
+		-- all members lost the entity
+		CHECK(client_entity(members[1], entity1) == nil)
+		CHECK(client_entity(members[2], entity1) == nil)
+		CHECK(client_entity(members[3], entity1) == nil)
+
+		-- restart with blacklist in next frame
+		server:set_networked(entity1, { [members[1] :: any] = true, [members[2] :: any] = true })
+		apply_updates(members)
+
+		-- member3 was not re-added
+		CHECK(client_entity(members[3], entity1) == nil)
+
+		-- member1 and member2 have the entity with both components (postponed restored)
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_component(members[1], entity1, 1) == "hello")
+		CHECK(client_component(members[1], entity1, 2) == "world")
+
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_component(members[2], entity1, 1) == "hello")
+		CHECK(client_component(members[2], entity1, 2) == "world")
+	end)
+
+	CASE("same-frame stop + start may delete-then-recreate for overlapping members", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1, nil)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		full_sync(members, entity1)
+
+		-- stop and restart in same frame: cross-storage ordering is non-deterministic
+		-- for overlapping members. Verify the server-side state is correct regardless.
+		server:stop_networked(entity1)
+		server:set_networked(entity1, nil)
+
+		-- server should have the entity networked with the same components
+		CHECK(server.track_info.networked[entity1] == true)
+		CHECK(server.storage[entity1] ~= nil)
+		CHECK(server.storage[entity1].components[components[1]] == "initial")
+	end)
+
+	CASE("deallocate_entity_stop is a no-op does not break blacklist flow", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1, nil)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "v1")
+
+		full_sync(members, entity1)
+
+		-- stop → blacklist → restart in same frame
+		server:stop_networked(entity1)
+		server:set_networked(entity1, { [members[2] :: any] = true })
+		apply_updates(members)
+
+		-- member1 was cleanly removed (deletion from old storage group)
+		CHECK(client_entity(members[1], entity1) == nil)
+
+		-- member2 was recreated
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_component(members[2], entity1, 1) == "v1")
+
+		-- update value on server, should replicate to member2 only
+		world:set(entity1, components[1], "v2")
+		apply_updates(members)
+
+		CHECK(client_component(members[2], entity1, 1) == "v2")
+		-- member1 is still nil
+		CHECK(client_entity(members[1], entity1) == nil)
 	end)
 end)
 

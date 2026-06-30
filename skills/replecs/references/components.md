@@ -4,20 +4,21 @@
 
 Replecs provides a set of special components used to configure replication behavior. These are available on both server and client via `replicator.components` or directly from the `Replecs` module when using pre-registration.
 
-| Component                          | Type                       | Purpose                                                                |
-| ---------------------------------- | -------------------------- | ---------------------------------------------------------------------- |
-| `shared` / `Shared`                | `Tag`                      | Marks a component as shared (included in handshake)                    |
-| `networked` / `Networked`          | `Entity<MemberFilter?>`    | Marks an entity as networked with optional player filter               |
-| `reliable` / `Reliable`            | `Entity<MemberFilter?>`    | Pairs with a component to track it for reliable replication            |
-| `unreliable` / `Unreliable`        | `Entity<MemberFilter?>`    | Pairs with a component for unreliable replication                      |
-| `relation` / `Relation`            | `Entity<MemberFilter?>`    | Pairs with a relation for relation replication                         |
-| `throttle` / `Throttle`            | `Entity<number?>`          | Pairs with a component to rate-limit replication (interval in seconds) |
-| `owned` / `Owned`                  | `Entity<MemberFilter?>`    | Pairs with a component to grant client ownership                       |
-| `serdes` / `Serdes`                | `Entity<SerdesTable>`      | Set on a component to register custom serialization (not a pair)       |
-| `custom` / `Custom`                | `Entity`                   | Pairs with a custom ID for entity identification                       |
-| `custom_handler` / `CustomHandler` | `Entity<(val) -> Entity?>` | Pairs with a component for custom ID resolution                        |
-| `global` / `Global`                | `Entity<number>`           | Assigns a small global ID (0–245) to an entity                         |
-| `__alive_tracking__`               | `Entity`                   | Internal: tracks entity lifecycle for cleanup                          |
+| Component                          | Type                         | Purpose                                                                                                                                                 |
+| ---------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `shared` / `Shared`                | `Tag`                        | Marks a component as shared (included in handshake)                                                                                                     |
+| `networked` / `Networked`          | `Entity<MemberFilter?>`      | Marks an entity as networked with optional player filter                                                                                                |
+| `reliable` / `Reliable`            | `Entity<MemberFilter?>`      | Pairs with a component to track it for reliable replication                                                                                             |
+| `unreliable` / `Unreliable`        | `Entity<MemberFilter?>`      | Pairs with a component for unreliable replication                                                                                                       |
+| `relation` / `Relation`            | `Entity<MemberFilter?>`      | Pairs with a relation for relation replication                                                                                                          |
+| `throttle` / `Throttle`            | `Entity<number?>`            | Pairs with a component to rate-limit replication (interval in seconds). Server-side: buffers component changes. Client-side: buffers ownership updates. |
+| `owned` / `Owned`                  | `Entity<MemberFilter?>`      | Pairs with a component to grant client ownership                                                                                                        |
+| `serdes` / `Serdes`                | `Entity<SerdesTable>`        | Set on a component to register custom serialization (not a pair)                                                                                        |
+| `validator` / `Validator`          | `Entity<OwnershipValidator>` | Set on a component to validate client ownership updates (not a pair). Works with or without serdes.                                                     |
+| `custom` / `Custom`                | `Entity`                     | Pairs with a custom ID for entity identification                                                                                                        |
+| `custom_handler` / `CustomHandler` | `Entity<(val) -> Entity?>`   | Pairs with a component for custom ID resolution                                                                                                         |
+| `global` / `Global`                | `Entity<number>`             | Assigns a small global ID (0–245) to an entity                                                                                                          |
+| `__alive_tracking__`               | `Entity`                     | Internal: tracks entity lifecycle for cleanup                                                                                                           |
 
 Both lowercase and PascalCase variants exist. They refer to the same underlying jecs entity.
 
@@ -40,11 +41,14 @@ world.set(
   new Map([[player1, true]]),
 );
 
-// Throttle at 20Hz
+// Server-side throttle at 20Hz
 world.set(MyComponent, pair(Replecs.Throttle, MyComponent), 1 / 20);
 
-// Shorthand
+// Shorthand (equivalent)
 server.set_throttle(MyComponent, 1 / 20);
+
+// Client-side throttle for ownership updates at 10Hz
+client.set_throttle(Position, 0.1);
 
 // Grant ownership to player
 world.set(entity, pair(Replecs.Owned, MyPosition), player);
@@ -120,19 +124,24 @@ world.set(MyEntityRef, Replecs.Serdes, {
 });
 ```
 
-### Ownership validation
+### Ownership Validators
+
+Validate client ownership updates server-side. The validator is a **separate component** from serdes — you can use it without custom serialization:
 
 ```ts
-world.set(MyPosition, Replecs.Serdes, {
-	bytespan: 12,
-	serialize: /* ... */,
-	deserialize: /* ... */,
-	ownership_validate: (pos: Vector3) => {
-		// Reject positions too far from origin (anti-cheat)
-		return pos.Magnitude < 10000;
-	},
+// Validator only — no serdes needed, uses default variant wire encoding
+world.set(Health, Replecs.Validator, {
+  validate: (value: number) => value >= 0 && value <= 100,
+});
+
+// Validator + serdes — custom serialization with separate validation
+world.set(Position, Replecs.Serdes, { bytespan: 12, serialize: /* ... */, deserialize: /* ... */ });
+world.set(Position, Replecs.Validator, {
+  validate: (pos: Vector3) => pos.Magnitude < 10000, // anti-cheat
 });
 ```
+
+Validation is applied **after** deserialization (if serdes is present) or on the raw variant value (if no serdes). If validation fails, the update is silently dropped.
 
 ---
 

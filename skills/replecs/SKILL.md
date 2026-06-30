@@ -22,6 +22,7 @@ ReplecsExtended is a fast, buffer-based ECS replication library for Roblox built
 - **Bitmask-based masking** for efficient per-player component filtering
 - **Custom IDs** for stable entity identification across server/client
 - **Serdes** (serializers/deserializers) for custom component value encoding
+- **Ownership Validators** — server-side validation of client ownership updates (separate from serdes)
 - **Ownership** — granting clients authority over specific components
 - **Throttle** — rate-limiting replication of specific components
 - **Relations** — replicating jecs relationships and pair values
@@ -142,8 +143,13 @@ const client = replicator.client;
 client.init();
 
 // On join, apply full snapshot from server
-const [buf, variants] = WaitForFullSnapshot();
+// get_full() returns optional ownership grants as 3rd/4th values
+const [buf, variants, grantBuf, grantVariants] =
+  replicator.server.get_full(player);
 client.apply_full(buf, variants);
+if (grantBuf) {
+  client.apply_ownership_grant(grantBuf, grantVariants);
+}
 
 // Apply ongoing updates
 client.apply_updates(buf, variants); // reliable
@@ -235,6 +241,21 @@ for (const [buf, variants] of client.collect_ownership()) {
 server.apply_ownership(buf, player, variants);
 ```
 
+**`get_full()` includes ownership grants**: `get_full()` returns optional ownership grants as 3rd/4th return values (`grantBuf?`, `grantVariants?`). This ensures joining players receive ownership data in the same initial snapshot. Grants are bitmask-filtered — only entities the player can see are included. The `ownership_dirty` flag for the player is **not** cleared, so `collect_ownership_grant()` can still send follow-up updates.
+
+```ts
+// Recommended join flow
+const [buf, variants, grantBuf, grantVariants] =
+  replicator.server.get_full(player);
+client.apply_full(buf, variants);
+if (grantBuf) {
+  client.apply_ownership_grant(grantBuf, grantVariants);
+}
+replicator.server.mark_player_ready(player);
+```
+
+**`collect_ownership_grant()` respects bitmask visibility**: Only sends grants for entities whose masking bitmask includes the player. If an entity is filtered out (not visible to the player), its ownership grant is skipped.
+
 **Mutual exclusion**: The server cannot modify a component that is owned by a client. Ownership must be removed first.
 
 **Important**: `set_owner` must be called **after** setting the component value. Once ownership is granted, the server is blocked from writing to that component:
@@ -251,6 +272,28 @@ server.set_owner(entity, Position, player);
 world.set(entity, Position, initialCFrame); // silently blocked!
 ```
 
+### Ownership Validators
+
+Validate client ownership updates server-side. The validator is a **separate component** from serdes — you can use it with or without custom serialization:
+
+```ts
+// Validator only — uses default variant wire encoding (no serialize/deserialize needed)
+world.set(Health, Replecs.Validator, {
+  validate: (value: number) => value >= 0 && value <= 100,
+});
+
+// Validator + serdes — custom serialization with separate validation
+world.set(Position, Replecs.Serdes, { bytespan: 12, serialize: /* ... */, deserialize: /* ... */ });
+world.set(Position, Replecs.Validator, {
+  validate: (value: Vector3) => value.Magnitude < 10000, // anti-cheat
+});
+
+// Shorthand (server-only)
+server.set_validator(Health, { validate: (v) => v >= 0 && v <= 100 });
+```
+
+If validation fails, the update is silently dropped. Validation applies to both serdes-deserialized values **and** default variant-encoded values.
+
 ### Throttle
 
 Rate-limit replication of specific components:
@@ -264,8 +307,11 @@ world.set(MyComponent, pair(Replecs.Throttle, MyComponent), 0.05);
 // Shorthand
 server.set_throttle(MyComponent, 0.05); // flushes every 0.05s = 20Hz
 
+// Client-side throttle for ownership updates (reduces client→server traffic)
+client.set_throttle(Position, 0.1); // ownership updates at 10Hz
+
 // Throttled components are buffered and flushed during collect_updates()
-// Unreliable components bypass throttle entirely
+// Unreliable components bypass server-side throttle entirely
 ```
 
 ### Custom IDs

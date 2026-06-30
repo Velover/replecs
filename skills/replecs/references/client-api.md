@@ -81,7 +81,7 @@ The optional `unreliable` parameter determines which buffer (and therefore which
 - **`false` (default)**: buffered into `ownership_buffer`, collected via `collect_ownership()`, sent over the reliable channel
 - **`true`**: buffered into `ownership_unreliable_buffer`, collected via `collect_ownership_unreliable()`, sent over the unreliable channel
 
-The raw value is stored and serialized at collect time (when `collect_ownership` / `collect_ownership_unreliable` is called), ensuring correct variant ordering. Throttle is **not** applied to ownership updates — values are always buffered immediately.
+The raw value is stored and serialized at collect time (when `collect_ownership` / `collect_ownership_unreliable` is called), ensuring correct variant ordering. If a client-side throttle is set for the component, the value is buffered in the throttle buffer and flushed at the specified interval (see `client.set_throttle`).
 
 The server does not need separate handlers — a single `server.apply_ownership()` routes internally based on the component's registered track type (`set_reliable` / `set_unreliable`).
 
@@ -93,9 +93,21 @@ client.request_set(entity, Position, newPos);
 client.request_set(entity, Position, newPos, true);
 ```
 
+### `client.set_throttle(component, interval)`
+
+Sets a throttle interval for ownership updates on a component. When set, `request_set` buffers the latest value instead of sending it immediately. The buffer is flushed into the ownership buffer during `collect_ownership()` / `collect_ownership_unreliable()` when the interval has elapsed.
+
+```ts
+// Throttle ownership updates to 10Hz (every 0.1s)
+client.set_throttle(Position, 0.1);
+
+// Now request_set buffers the latest value, only sending every 0.1s
+client.request_set(entity, Position, newPos);
+```
+
 ### `client.collect_ownership(): () => [buffer, variants]`
 
-Iterator that serializes and yields **reliable** ownership updates. Clears the buffer after yielding. Send via the reliable zap event.
+Iterator that serializes and yields **reliable** ownership updates. Clears the buffer after yielding. Flushes any pending throttle buffers whose interval has elapsed before collecting. Send via the reliable zap event.
 
 ```ts
 for (const [buf, variants] of client.collect_ownership()) {
@@ -105,7 +117,7 @@ for (const [buf, variants] of client.collect_ownership()) {
 
 ### `client.collect_ownership_unreliable(): () => [buffer, variants]`
 
-Iterator that serializes and yields **unreliable** ownership updates. Clears the buffer after yielding. Send via the unreliable zap event.
+Iterator that serializes and yields **unreliable** ownership updates. Clears the buffer after yielding. Flushes any pending throttle buffers whose interval has elapsed before collecting. Send via the unreliable zap event.
 
 ```ts
 for (const [buf, variants] of client.collect_ownership_unreliable()) {
@@ -290,19 +302,19 @@ Returns the total number of shared components.
 
 ## Properties
 
-| Property                             | Type                                          | Description                                           |
-| ------------------------------------ | --------------------------------------------- | ----------------------------------------------------- |
-| `client.world`                       | `World`                                       | The jecs world                                        |
-| `client.inited`                      | `boolean?`                                    | Init state                                            |
-| `client.is_replicating`              | `boolean`                                     | True during `apply_*` calls                           |
-| `client.components`                  | `Components`                                  | Shared component definitions                          |
-| `client.shared`                      | `Shared`                                      | Resolved shared state                                 |
-| `client.server_ids`                  | `{ [number]: Entity }`                        | Server ID → client entity mapping                     |
-| `client.client_ids`                  | `{ [Entity]: number }`                        | Client entity → server ID mapping                     |
-| `client.ownership_grants`            | `Map<Entity, Map<Component, boolean>>`        | Active ownership grants                               |
-| `client.ownership_buffer`            | `Map<Entity, Map<Component, { value: any }>>` | Pending reliable ownership updates                    |
-| `client.ownership_unreliable_buffer` | `Map<Entity, Map<Component, { value: any }>>` | Pending unreliable ownership updates                  |
-| `client.command_buffers`             | `{ [Entity]: CommandBuffer }?`                | Active during replication (hooks see buffered writes) |
+| Property                             | Type                                   | Description                                           |
+| ------------------------------------ | -------------------------------------- | ----------------------------------------------------- |
+| `client.world`                       | `World`                                | The jecs world                                        |
+| `client.inited`                      | `boolean?`                             | Init state                                            |
+| `client.is_replicating`              | `boolean`                              | True during `apply_*` calls                           |
+| `client.components`                  | `Components`                           | Shared component definitions                          |
+| `client.shared`                      | `Shared`                               | Resolved shared state                                 |
+| `client.server_ids`                  | `{ [number]: Entity }`                 | Server ID → client entity mapping                     |
+| `client.client_ids`                  | `{ [Entity]: number }`                 | Client entity → server ID mapping                     |
+| `client.ownership_grants`            | `Map<Entity, Map<Component, boolean>>` | Active ownership grants                               |
+| `client.ownership_buffer`            | `Map<Entity, Map<Component, any>>`     | Pending reliable ownership updates                    |
+| `client.ownership_unreliable_buffer` | `Map<Entity, Map<Component, any>>`     | Pending unreliable ownership updates                  |
+| `client.command_buffers`             | `{ [Entity]: CommandBuffer }?`         | Active during replication (hooks see buffered writes) |
 
 ---
 

@@ -157,17 +157,48 @@ world.set(component, Replecs.Serdes, {
 
 Removes the serdes for a component.
 
+---\n
+
+## Validators
+
+### `server.set_validator<T>(component: Component<T>, validator: OwnershipValidator<T>)`
+
+Registers an ownership validator for a component. Can also be done via the ECS:
+
+```ts
+// Via ECS (set directly on the component entity, NOT via pair)
+world.set(component, Replecs.Validator, {
+  validate: (value: number) => value >= 0 && value <= 100,
+});
+
+// Via shorthand
+server.set_validator(component, {
+  validate: (value) => value >= 0 && value <= 100,
+});
+```
+
+Validators work with or without serdes. When serdes is present, validation runs after deserialization. When no serdes, validation runs on the raw variant value. Server-only — not included in handshake.
+
+### `server.remove_validator(component)`
+
+Removes the validator for a component.
+
 ---
 
 ## Collection & Sending
 
-### `server.get_full(player): [buffer, variants]`
+### `server.get_full(player): [buffer, variants, grantBuf?, grantVariants?]`
 
 Returns the full snapshot of all networked entities visible to a player. Use during the join handshake.
 
+If the player has any ownership grants, they are returned as optional 3rd/4th values as a pre-built `ownership_grant` packet (bitmask-filtered — only entities the player can see are included). The `ownership_dirty` flag is **not** cleared, so `collect_ownership_grant()` can still send follow-up updates.
+
 ```ts
-const [buf, variants] = server.get_full(player);
+const [buf, variants, grantBuf, grantVariants] = server.get_full(player);
 SendToPlayer(player, buf, variants);
+if (grantBuf) {
+  SendOwnershipGrant(player, grantBuf, grantVariants);
+}
 ```
 
 ### `server.collect_updates(): () => [Player, buffer, variants]`
@@ -202,7 +233,7 @@ for (const [player, buf, variants] of server.collect_entity(entity)) {
 
 ### `server.collect_ownership_grant(): () => [Player, buffer, variants]`
 
-Iterator that yields ownership grant packets for players whose ownership has changed since last call. Only yields for dirty players.
+Iterator that yields ownership grant packets for players whose ownership has changed since last call. Only yields for dirty players. Grants are **bitmask-filtered** — only entities whose masking bitmask includes the player are sent. If a player has no visible owned entities, an empty grant (count=0) is sent to clear stale client-side grants.
 
 ```ts
 for (const [player, buf, variants] of server.collect_ownership_grant()) {

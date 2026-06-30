@@ -146,6 +146,64 @@ server.set_reliable(entity, Health); // inherits entity filter → StorageGroup 
 server.set_reliable(entity, Secret, new Map([[admin, true]])); // different filter → StorageGroup B
 ```
 
+## Filter Blacklist: Orphaned Entity Gotcha
+
+### The Problem
+
+When a player is **removed from an entity's filter** (blacklisted) after the entity was already replicated to them, the masking system calls `move_entity_storage` to migrate the entity to a new storage group. **No deletion packet is generated for the blacklisted player** — it's purely a routing change.
+
+If you later `world:delete(entity)`, `stop_networked` calls `allocate_entity_stop`, which writes the deletion to the entity's **current** storage group — the one that does NOT include the blacklisted player. The blacklisted player keeps the orphaned entity forever on their client.
+
+### Correct Patterns
+
+**Option 1: Delete/stop BEFORE changing the filter**
+
+```ts
+// Entity is replicated to all players including playerA
+
+// Step 1: Remove entity while playerA can still see it
+server.stop_networked(entity); // sends deletion to all current members
+
+// Step 2: Now filter is irrelevant — entity is gone
+server.set_networked(entity, new Map([[playerA, false]]));
+```
+
+**Option 2: Simply delete the entity**
+
+```ts
+world.delete(entity); // triggers __alive_tracking__ removal → stop_networked → deletion to all current members
+// filter blacklist is moot — entity is gone
+```
+
+**Option 3: Don't blacklist — just stop networking and re-start with a new filter**
+
+```ts
+server.stop_networked(entity); // all members (including playerA) get deletion
+server.set_networked(entity, new Map([[playerA, false]])); // restart with new filter
+// playerA never sees the entity again; other players get a clean recreate
+```
+
+### Why `move_entity_storage` Doesn't Generate Deletions
+
+This is by design. Storage group migration is an internal routing optimization — it moves the entity's active entries, pending changes, and additions from one storage group to another. The system assumes the entity is continuous; only explicit `stop_networked` / `world:delete` generates lifecycle packets.
+
+## Stop & Restart Behavior
+
+`stop_networked` followed by `set_networked` on the same entity works correctly:
+
+1. **Stop**: `allocate_entity_stop` writes deletion to current storage group; `stop_entity` saves all component registrations to the **postponed** list
+2. **Restart**: `start_entity` restores all postponed components automatically; `allocate_propagated_entity_start` marks the entity as added
+3. **Single update**: Both the deletion and the creation are delivered in the same `collect_updates` call — the client processes **delete → recreate** in one network round-trip
+
+**You do NOT need to re-register components** — the masking system preserves them via the postponed mechanism. Only `track_info.networked` is cleared; `track_info.entities` (with all component/pair tracking types) persists.
+
+```ts
+// This is valid and efficient:
+server.stop_networked(entity);
+server.set_networked(entity, newFilter);
+// All components are automatically restored; entity is recreated for eligible players
+```
+
 ## Performance Characteristics
 
 - **Bitmask operations**: O(1) per player per storage group check

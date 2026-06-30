@@ -32,7 +32,10 @@ export type Serdes<T = any> = {
 	bytespan: number?,
 	serialize: (value: T) -> (buffer, ...{ any }),
 	deserialize: (buffer, ...{ any }) -> T,
-	ownership_validate: ((raw_value: T) -> boolean)?,
+}
+
+export type OwnershipValidator<T = any> = {
+	validate: (value: T) -> boolean,
 }
 
 export type Components = {
@@ -54,6 +57,8 @@ export type Components = {
 
 	serdes: Component<Serdes>,
 	Serdes: Component<Serdes>,
+	validator: Component<OwnershipValidator>,
+	Validator: Component<OwnershipValidator>,
 	custom: Entity,
 	Custom: Entity,
 	custom_handler: Component<(val: any) -> Entity?>,

@@ -194,6 +194,7 @@ function utils.create_components(tag: () -> Component, component: () -> Componen
 	end
 	components.custom_handler = component()
 	components.serdes = component()
+	components.validator = component()
 	components.global = component()
 	components.__alive_tracking__ = tag()
 
@@ -210,6 +211,7 @@ function utils.create_components(tag: () -> Component, component: () -> Componen
 	end
 	components.CustomHandler = components.custom_handler
 	components.Serdes = components.serdes
+	components.Validator = components.validator
 	components.Global = components.global
 	return components
 end
@@ -227,6 +229,7 @@ function utils.add_component_names(components: types.Components, set: (component
 	end
 	set(components.custom_handler, "replecs.custom_handler")
 	set(components.serdes, "replecs.serdes")
+	set(components.validator, "replecs.validator")
 	set(components.global, "replecs.global")
 
 	set(components.__alive_tracking__, "replecs.__alive_tracking__")
