@@ -15,9 +15,7 @@ declare namespace Replecs {
         deserialize: (buffer: buffer, blobs: defined[] | undefined) => T;
       };
 
-  export interface OwnershipValidator<T = any> {
-    validate: (value: T) => boolean;
-  }
+  export type OwnershipValidator<T = any> = (value: T) => boolean;
 
   type MemberFilterMap = Map<Player, boolean>;
   type MemberFilter = Player | MemberFilterMap | undefined;

@@ -34,9 +34,7 @@ export type Serdes<T = any> = {
 	deserialize: (buffer, ...{ any }) -> T,
 }
 
-export type OwnershipValidator<T = any> = {
-	validate: (value: T) -> boolean,
-}
+export type OwnershipValidator<T = any> = (value: T) -> boolean
 
 export type Components = {
 	shared: Entity,

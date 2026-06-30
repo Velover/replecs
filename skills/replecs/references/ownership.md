@@ -103,11 +103,7 @@ The `validator` component validates client ownership updates server-side. It is 
 
 ```ts
 // Validator only — no serdes needed, uses default variant wire encoding
-world.set(Health, Replecs.Validator, {
-	validate: (value: number) => {
-		return value >= 0 && value <= 100;
-	},
-});
+world.set(Health, Replecs.Validator, (value: number) => value >= 0 && value <= 100);
 
 // Validator + serdes — custom serialization with separate validation
 world.set(Position, Replecs.Serdes, {
@@ -115,14 +111,10 @@ world.set(Position, Replecs.Serdes, {
 	serialize: /* ... */,
 	deserialize: /* ... */,
 });
-world.set(Position, Replecs.Validator, {
-	validate: (value: Vector3) => {
-		return value.Magnitude < 10000;  // anti-cheat: reject far positions
-	},
-});
+world.set(Position, Replecs.Validator, (value: Vector3) => value.Magnitude < 10000);
 
 // Shorthand (server-only)
-server.set_validator(Health, { validate: (v) => v >= 0 && v <= 100 });
+server.set_validator(Health, (v) => v >= 0 && v <= 100);
 ```
 
 Validation is applied **after** deserialization (if serdes is present) or on the raw variant value (if no serdes). If validation fails, the update is silently dropped.

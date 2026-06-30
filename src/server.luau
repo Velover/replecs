@@ -2163,7 +2163,7 @@ local function read_serdes_value(
 		end
 
 		local validator = server.component_validators[component]
-		if validator and not validator.validate(value) then
+		if validator and not validator(value) then
 			common.log_warn(`ownership validation failed for component {common.log_component(server.world, component)}`)
 			return false, nil
 		end
@@ -2186,7 +2186,7 @@ local function read_serdes_value(
 
 		local value = variants[variant_id]
 		local validator = server.component_validators[component]
-		if validator and not validator.validate(value) then
+		if validator and not validator(value) then
 			common.log_warn(`ownership validation failed for component {common.log_component(server.world, component)}`)
 			return false, nil
 		end

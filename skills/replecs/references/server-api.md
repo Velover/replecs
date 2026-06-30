@@ -168,14 +168,14 @@ Registers an ownership validator for a component. Can also be done via the ECS:
 
 ```ts
 // Via ECS (set directly on the component entity, NOT via pair)
-world.set(component, Replecs.Validator, {
-  validate: (value: number) => value >= 0 && value <= 100,
-});
+world.set(
+  component,
+  Replecs.Validator,
+  (value: number) => value >= 0 && value <= 100,
+);
 
 // Via shorthand
-server.set_validator(component, {
-  validate: (value) => value >= 0 && value <= 100,
-});
+server.set_validator(component, (value) => value >= 0 && value <= 100);
 ```
 
 Validators work with or without serdes. When serdes is present, validation runs after deserialization. When no serdes, validation runs on the raw variant value. Server-only — not included in handshake.

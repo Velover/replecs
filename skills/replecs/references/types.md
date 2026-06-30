@@ -43,9 +43,7 @@ type SerdesTable<T = any> =
 ## Ownership Validator
 
 ```ts
-interface OwnershipValidator<T = any> {
-  validate: (value: T) => boolean;
-}
+type OwnershipValidator<T = any> = (value: T) => boolean;
 ```
 
 Separate from serdes — validates client ownership updates server-side. Works with or without serdes. Server-only.

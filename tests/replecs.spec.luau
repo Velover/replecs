@@ -2613,12 +2613,10 @@ TEST("ownership", function()
 				return buffer.readf64(buf, 0)
 			end,
 		}
-		local validator: replecs.OwnershipValidator = {
-			validate = function(value: number): boolean
-				validate_called = true
-				return value >= 0 and value <= 100
-			end,
-		}
+		local validator: replecs.OwnershipValidator = function(value: number): boolean
+			validate_called = true
+			return value >= 0 and value <= 100
+		end
 
 		local components = create_test_components(world)
 		world:set(components[1], replecs.serdes, serdes)
@@ -2662,12 +2660,10 @@ TEST("ownership", function()
 
 	CASE("should allow validator-only without serdes", function()
 		local validate_called = false
-		local validator: replecs.OwnershipValidator = {
-			validate = function(value: number): boolean
-				validate_called = true
-				return value >= 0 and value <= 100
-			end,
-		}
+		local validator: replecs.OwnershipValidator = function(value: number): boolean
+			validate_called = true
+			return value >= 0 and value <= 100
+		end
 
 		local components = create_test_components(world)
 		world:set(components[1], replecs.validator, validator)
@@ -2709,11 +2705,9 @@ TEST("ownership", function()
 	end)
 
 	CASE("should reject invalid values with validator", function()
-		local validator: replecs.OwnershipValidator = {
-			validate = function(value: number): boolean
-				return value >= 0 and value <= 100
-			end,
-		}
+		local validator: replecs.OwnershipValidator = function(value: number): boolean
+			return value >= 0 and value <= 100
+		end
 
 		local components = create_test_components(world)
 		world:set(components[1], replecs.validator, validator)
@@ -4175,11 +4169,9 @@ TEST("memory leaks", function()
 				return buffer.readf64(buf, 0)
 			end,
 		}
-		local validator: replecs.OwnershipValidator = {
-			validate = function(value: number): boolean
-				return value >= 0 and value <= 100
-			end,
-		}
+		local validator: replecs.OwnershipValidator = function(value: number): boolean
+			return value >= 0 and value <= 100
+		end
 
 		local components = create_test_components(world)
 		world:set(components[1], replecs.serdes, serdes)
