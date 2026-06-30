@@ -149,9 +149,10 @@ world.set(component, Replecs.Serdes, {
   deserialize: (buf, variants?) => {
     /* ... */ return value;
   },
-  ownership_validate: (value) => true, // optional: validate client ownership updates
 });
 ```
+
+Server-only — serdes are not sent to the client. For ownership validation, see [Validators](#validators) below.
 
 ### `server.remove_serdes(component)`
 

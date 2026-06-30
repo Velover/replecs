@@ -97,11 +97,6 @@ declare namespace Replecs {
       serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
-    set_validator<T extends Id>(
-      component: T,
-      validator: OwnershipValidator<InferComponent<T>>,
-    ): void;
-    remove_validator(component: Id): void;
     set_throttle(component: Entity, interval: number): void;
   }
 
@@ -246,6 +241,11 @@ declare namespace Replecs {
       serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
+    set_validator<T extends Id>(
+      component: T,
+      validator: OwnershipValidator<InferComponent<T>>,
+    ): void;
+    remove_validator(component: Id): void;
   }
 
   export interface Server extends ServerImp {
@@ -335,6 +335,11 @@ declare namespace Replecs {
       serdes: SerdesTable<InferComponent<T>>,
     ): void;
     remove_serdes(component: Id): void;
+    set_validator<T extends Id>(
+      component: T,
+      validator: OwnershipValidator<InferComponent<T>>,
+    ): void;
+    remove_validator(component: Id): void;
   }
 
   export interface Replecs extends Components {

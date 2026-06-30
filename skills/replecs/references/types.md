@@ -158,7 +158,9 @@ interface Server extends ServerImp {
 
   register_custom_id(custom_id: CustomId): void;
 
-  get_full(player: Player): LuaTuple<[buffer, defined[][] | undefined]>;
+  get_full(
+    player: Player,
+  ): LuaTuple<[buffer, defined[][] | undefined, buffer?, defined[][]?]>;
   collect_entity(
     entity: Entity,
   ): IterableFunction<LuaTuple<[Player, buffer, defined[][] | undefined]>>;
@@ -201,6 +203,8 @@ interface ServerImp {
   ): void;
   set_pair(entity: Entity, id: Pair, filter?: MemberFilter): void;
   set_relation(entity: Entity, relation: Entity, filter?: MemberFilter): void;
+  set_owner(entity: Entity, component: Entity, player: Player): void;
+  set_throttle(component: Entity, interval: number): void;
 
   stop_networked(entity: Entity, keep?: boolean): void;
   stop_reliable(entity: Entity, component: Entity, keep?: boolean): void;
@@ -216,6 +220,11 @@ interface ServerImp {
     serdes: SerdesTable<T>,
   ): void;
   remove_serdes(component: Id): void;
+  set_validator<T extends Id>(
+    component: T,
+    validator: OwnershipValidator<InferComponent<T>>,
+  ): void;
+  remove_validator(component: Id): void;
 }
 ```
 
@@ -322,6 +331,11 @@ interface ReplecsLib {
     serdes: SerdesTable<T>,
   ): void;
   remove_serdes(component: Id): void;
+  set_validator<T extends Id>(
+    component: T,
+    validator: OwnershipValidator<InferComponent<T>>,
+  ): void;
+  remove_validator(component: Id): void;
 }
 
 interface Replecs extends Components {
@@ -334,6 +348,7 @@ interface Replecs extends Components {
     identifier: string,
     handler?: (ctx: HandleContext) => Entity,
   ) => CustomId;
+  create_interpolation: (config?: InterpolatorConfig) => Interpolator;
 }
 ```
 
