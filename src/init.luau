@@ -36,6 +36,7 @@ export type ReplecsLib = {
 	remove_serdes: (self: ReplecsLib, id: Component) -> (),
 	set_validator: <T>(self: ReplecsLib, id: Component<T>, validator: types.OwnershipValidator<T>) -> (),
 	remove_validator: (self: ReplecsLib, id: Component) -> (),
+	set_throttle: (self: ReplecsLib, component: Component, interval: number) -> (),
 }
 
 type Replecs = types.Components & {
@@ -151,6 +152,15 @@ end
 function replecs.remove_validator(lib: ReplecsLib, id: Component)
 	if lib.server then
 		lib.server:remove_validator(id)
+	end
+end
+
+function replecs.set_throttle(lib: ReplecsLib, component: Component, interval: number)
+	if lib.server then
+		lib.server:set_throttle(component, interval)
+	end
+	if lib.client then
+		lib.client:set_throttle(component, interval)
 	end
 end
 

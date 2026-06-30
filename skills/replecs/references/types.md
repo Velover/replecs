@@ -336,6 +336,7 @@ interface ReplecsLib {
     validator: OwnershipValidator<InferComponent<T>>,
   ): void;
   remove_validator(component: Id): void;
+  set_throttle(component: Entity, interval: number): void;
 }
 
 interface Replecs extends Components {

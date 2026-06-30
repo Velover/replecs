@@ -340,6 +340,7 @@ declare namespace Replecs {
       validator: OwnershipValidator<InferComponent<T>>,
     ): void;
     remove_validator(component: Id): void;
+    set_throttle(component: Entity, interval: number): void;
   }
 
   export interface Replecs extends Components {
