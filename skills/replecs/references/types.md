@@ -59,6 +59,7 @@ interface Components {
   relation: Entity<MemberFilter>;
   throttle: Entity<number | undefined>;
   owned: Entity<MemberFilter>;
+  local_owner: Entity<Entity>;
 
   serdes: Entity<SerdesTable>;
   validator: Entity<OwnershipValidator>;
@@ -73,6 +74,7 @@ interface Components {
   Relation: Entity<MemberFilter>;
   Throttle: Entity<number | undefined>;
   Owned: Entity<MemberFilter>;
+  LocalOwner: Entity<Entity>;
 
   Serdes: Entity<SerdesTable>;
   Validator: Entity<OwnershipValidator>;

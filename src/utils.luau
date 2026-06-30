@@ -189,6 +189,7 @@ function utils.create_components(tag: () -> Component, component: () -> Componen
 		components.relation = component()
 		components.throttle = component()
 		components.owned = component()
+		components.local_owner = component()
 
 		components.custom = tag()
 	end
@@ -206,6 +207,7 @@ function utils.create_components(tag: () -> Component, component: () -> Componen
 		components.Relation = components.relation
 		components.Throttle = components.throttle
 		components.Owned = components.owned
+		components.LocalOwner = components.local_owner
 
 		components.Custom = components.custom
 	end
@@ -225,6 +227,7 @@ function utils.add_component_names(components: types.Components, set: (component
 		set(components.relation, "replecs.relation")
 		set(components.throttle, "replecs.throttle")
 		set(components.owned, "replecs.owned")
+		set(components.local_owner, "replecs.local_owner")
 		set(components.custom, "replecs.custom")
 	end
 	set(components.custom_handler, "replecs.custom_handler")

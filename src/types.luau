@@ -52,6 +52,8 @@ export type Components = {
 	Throttle: Component<number?>,
 	owned: Component<AnyFilter?>,
 	Owned: Component<AnyFilter?>,
+	local_owner: Component<Entity>,
+	LocalOwner: Component<Entity>,
 
 	serdes: Component<Serdes>,
 	Serdes: Component<Serdes>,

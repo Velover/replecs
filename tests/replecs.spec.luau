@@ -3515,6 +3515,187 @@ TEST("ownership", function()
 		CHECK(members[1].client.ownership_grants[c_entity] == nil)
 		CHECK(members[1].client.ownership_buffer[c_entity] == nil)
 	end)
+
+	CASE("local_owner pair should be set when ownership is granted", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(2)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(entity1, components[2])
+		world:set(entity1, components[1], "val1")
+		world:set(entity1, components[2], "val2")
+
+		-- full sync
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+
+		-- grant ownership of component1 to member1
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		-- deliver grants
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity1 = client_entity(members[1], entity1) :: any
+		local c_entity2 = client_entity(members[2], entity1) :: any
+		local local_owner_relation = members[1].client.components.local_owner
+
+		-- member1 should have the local_owner pair for component1
+		CHECK(members[1].world:has(c_entity1, jecs.pair(local_owner_relation, members[1].components[1])) == true)
+		-- member1 should NOT have the local_owner pair for component2
+		CHECK(members[1].world:has(c_entity1, jecs.pair(local_owner_relation, members[1].components[2])) == false)
+		-- member2 should NOT have any local_owner pair
+		CHECK(members[2].world:has(c_entity2, jecs.pair(local_owner_relation, members[2].components[1])) == false)
+	end)
+
+	CASE("local_owner pair should be queryable via world:query", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(entity1, components[2])
+		world:set(entity1, components[1], "val1")
+		world:set(entity1, components[2], "val2")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership of component1
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local client = members[1].client
+		local local_owner_relation = client.components.local_owner
+
+		-- query for entities with local_owner for component1 — should find one
+		local found = 0
+		for _entity in client.world:query(jecs.pair(local_owner_relation, members[1].components[1])):iter() do
+			found += 1
+		end
+		CHECK(found == 1)
+
+		-- query for entities with local_owner for component2 — should find none
+		local found2 = 0
+		for _entity in client.world:query(jecs.pair(local_owner_relation, members[1].components[2])):iter() do
+			found2 += 1
+		end
+		CHECK(found2 == 0)
+	end)
+
+	CASE("local_owner pair should be removed on revocation", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		local local_owner_relation = members[1].client.components.local_owner
+
+		-- local_owner pair should exist
+		CHECK(members[1].world:has(c_entity, jecs.pair(local_owner_relation, members[1].components[1])) == true)
+
+		-- revoke ownership
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		-- local_owner pair should be gone
+		CHECK(members[1].world:has(c_entity, jecs.pair(local_owner_relation, members[1].components[1])) == false)
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == false)
+	end)
+
+	CASE("local_owner pair should be re-set after revoke and re-grant", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(1)
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "initial")
+
+		local buf, variants = server:get_full(members[1] :: any)
+		members[1].client:apply_full(buf, variants)
+
+		-- grant ownership
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+
+		local c_entity = client_entity(members[1], entity1) :: any
+		local local_owner_relation = members[1].client.components.local_owner
+
+		CHECK(members[1].world:has(c_entity, jecs.pair(local_owner_relation, members[1].components[1])) == true)
+
+		-- revoke
+		world:remove(entity1, jecs.pair(replecs.owned, components[1]))
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+		CHECK(members[1].world:has(c_entity, jecs.pair(local_owner_relation, members[1].components[1])) == false)
+
+		-- re-grant
+		world:set(entity1, jecs.pair(replecs.owned, components[1]), members[1] :: any)
+		for player, grant_buf, grant_variants in server:collect_ownership_grant() do
+			local member: MemberData = player :: any
+			member.client:apply_ownership_grant(grant_buf, grant_variants)
+		end
+		CHECK(members[1].world:has(c_entity, jecs.pair(local_owner_relation, members[1].components[1])) == true)
+		CHECK(members[1].client:has_ownership(c_entity, members[1].components[1]) == true)
+	end)
 end)
 
 TEST("ownership buffer validation", function()

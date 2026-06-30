@@ -258,6 +258,43 @@ replicator.server.mark_player_ready(player);
 
 **Mutual exclusion**: The server cannot modify a component that is owned by a client. Ownership must be removed first.
 
+### LocalOwner Pair
+
+When the client receives ownership grants, `pair(Replecs.LocalOwner, Component)` is automatically written into the client's ECS world. This lets you query for all entities where the local player owns a specific component:
+
+```ts
+import { pair } from "@rbxts/jecs";
+
+// Query all entities where local player owns Position
+for (const [entity, _] of client.world.query(
+  pair(Replecs.LocalOwner, Position),
+)) {
+  // local player owns Position on this entity
+}
+
+// Pair with a specific query target to also get the value
+for (const [entity, pos] of client.world.query(
+  pair(Replecs.LocalOwner, Position),
+  Position,
+)) {
+  // `pos` is the current Position value
+}
+
+// Use with multiple components
+for (const [entity] of client.world.query(
+  pair(Replecs.LocalOwner, Health),
+  pair(Replecs.LocalOwner, Position),
+)) {
+  // local player owns both Health and Position on this entity
+}
+```
+
+- The pair value is set to the entity itself (the local player's entity). If you need the actual Player reference, use `client.get_client_entity()` or your own mapping.
+- Pairs are automatically removed when ownership is revoked (next `apply_ownership_grant` cycle) or when the entity is destroyed.
+- Only the client that was granted ownership sees the `local_owner` pair — other clients do not.
+
+### Ownership (continued)
+
 **Important**: `set_owner` must be called **after** setting the component value. Once ownership is granted, the server is blocked from writing to that component:
 
 ```ts

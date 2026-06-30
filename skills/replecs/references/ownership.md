@@ -196,6 +196,42 @@ On the client, ownership state is tracked in two maps:
 
 When an entity is deleted (`__alive_tracking__` removed), all three maps are cleaned up for that entity.
 
+## LocalOwner Pair
+
+When the client receives ownership grants (via `apply_ownership_grant`), `pair(Replecs.LocalOwner, Component)` is automatically written into the client's ECS world. This enables jecs queries for entities where the local player owns a specific component.
+
+```ts
+import { pair } from "@rbxts/jecs";
+
+// Query all entities where local player owns Position
+for (const [entity] of client.world.query(pair(Replecs.LocalOwner, Position))) {
+  // local player owns Position on this entity
+}
+
+// Pair with the actual component to also read the value
+for (const [entity, pos] of client.world.query(
+  pair(Replecs.LocalOwner, Position),
+  Position,
+)) {
+  // pos is the current Position value
+}
+
+// Filter for entities where local player owns multiple components
+for (const [entity] of client.world.query(
+  pair(Replecs.LocalOwner, Health),
+  pair(Replecs.LocalOwner, Position),
+)) {
+  // local player owns both Health and Position on this entity
+}
+```
+
+**Lifecycle:**
+
+- The pair value is set to the local entity itself. To get the actual Player reference, use `client.get_client_entity()` or your own mapping.
+- Pairs are removed when ownership is revoked (next `apply_ownership_grant` cycle clears old grants before writing new ones).
+- Pairs are removed when the entity is destroyed.
+- Only the client that was granted ownership sees the `local_owner` pair — other clients do not.
+
 ## Anti-Patterns
 
 ### ❌ Server modifying owned components

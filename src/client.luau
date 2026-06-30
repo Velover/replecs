@@ -1549,7 +1549,15 @@ function client_replicator.apply_ownership_grant(client: Client, buf: buffer, al
 	local c = cursor.from(buf)
 	check_packet_type(c, PACKET_TYPES.ownership_grant)
 
-	-- clear old grants
+	local world = client.world
+	local local_owner = client.components.local_owner
+
+	-- clear old grants and remove stale local_owner pairs
+	for entity, entity_grants in client.ownership_grants do
+		for component in entity_grants do
+			WORLD_REMOVE(world, entity, PAIR(local_owner, component))
+		end
+	end
 	table.clear(client.ownership_grants)
 
 	local total_packets = cursor.read_vlq(c)
@@ -1567,6 +1575,7 @@ function client_replicator.apply_ownership_grant(client: Client, buf: buffer, al
 					client.ownership_grants[entity] = entity_grants
 				end
 				entity_grants[component] = true
+				WORLD_SET(world, entity, PAIR(local_owner, component), entity)
 			end
 		end
 	end
