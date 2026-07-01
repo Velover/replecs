@@ -625,6 +625,16 @@ function bitmask.clear(self: Bitmask, index: number)
 	bitmask.write(self, entry_index, new_value)
 end
 
+function bitmask.is_zero(self: Bitmask): boolean
+	local buf = self.buffer
+	for i = 0, self.entries - 1 do
+		if buffer.readu32(buf, i * BYTES_PER_ENTRY) ~= 0 then
+			return false
+		end
+	end
+	return true
+end
+
 -- BITWISE OPERATIONS
 
 function bitmask.band(self: Bitmask, other: Bitmask): Bitmask
@@ -651,6 +661,34 @@ function bitmask.bor(self: Bitmask, other: Bitmask): Bitmask
 	end
 
 	return result
+end
+
+-- self & ~other: AND-NOT without allocating an intermediate bnot
+function bitmask.band_not(self: Bitmask, other: Bitmask): Bitmask
+	local max_entries = math.max(self.entries, other.entries)
+	local result = bitmask.create(max_entries * BITS_PER_ENTRY)
+
+	for i = 0, max_entries - 1 do
+		local value1 = bitmask.read(self, i)
+		local value2 = bitmask.read(other, i)
+		bitmask.write(result, i, bit32.band(value1, bit32.bnot(value2)))
+	end
+
+	return result
+end
+
+-- Mutating OR: self |= other (zero allocations)
+function bitmask.bor_into(self: Bitmask, other: Bitmask)
+	local max_entries = math.max(self.entries, other.entries)
+	if max_entries > self.entries then
+		bitmask.expand(self, max_entries * BITS_PER_ENTRY)
+	end
+
+	for i = 0, max_entries - 1 do
+		local value1 = bitmask.read(self, i)
+		local value2 = bitmask.read(other, i)
+		bitmask.write(self, i, bit32.bor(value1, value2))
+	end
 end
 
 function bitmask.bxor(self: Bitmask, other: Bitmask): Bitmask

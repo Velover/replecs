@@ -159,19 +159,31 @@ declare namespace Replecs {
   }
 
   export interface ServerImp {
-    set_networked(entity: Entity, filter?: MemberFilter): void;
+    set_networked(entity: Entity, filter?: MemberFilter, keep?: boolean): void;
     set_reliable(
       entity: Entity,
       component: Entity,
       filter?: MemberFilter,
+      keep?: boolean,
     ): void;
     set_unreliable(
       entity: Entity,
       component: Entity,
       filter?: MemberFilter,
+      keep?: boolean,
     ): void;
-    set_pair(entity: Entity, id: Pair, filter?: MemberFilter): void;
-    set_relation(entity: Entity, relation: Entity, filter?: MemberFilter): void;
+    set_pair(
+      entity: Entity,
+      id: Pair,
+      filter?: MemberFilter,
+      keep?: boolean,
+    ): void;
+    set_relation(
+      entity: Entity,
+      relation: Entity,
+      filter?: MemberFilter,
+      keep?: boolean,
+    ): void;
 
     stop_networked(entity: Entity, keep?: boolean): void;
     stop_reliable(entity: Entity, component: Entity, keep?: boolean): void;
