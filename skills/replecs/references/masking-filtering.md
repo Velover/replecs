@@ -146,46 +146,82 @@ server.set_reliable(entity, Health); // inherits entity filter → StorageGroup 
 server.set_reliable(entity, Secret, new Map([[admin, true]])); // different filter → StorageGroup B
 ```
 
-## Filter Blacklist: Orphaned Entity Gotcha
+## Filter Changes and Player Deletions
 
-### The Problem
+### Default Behavior (keep=false)
 
-When a player is **removed from an entity's filter** (blacklisted) after the entity was already replicated to them, the masking system calls `move_entity_storage` to migrate the entity to a new storage group. **No deletion packet is generated for the blacklisted player** — it's purely a routing change.
+When a player is **removed from an entity's filter** (blacklisted) after the entity was already replicated to them, the masking system computes a bitmask delta between the old and new filter results. By default (`keep=false`), **deletion packets are automatically generated for removed players**.
 
-If you later `world:delete(entity)`, `stop_networked` calls `allocate_entity_stop`, which writes the deletion to the entity's **current** storage group — the one that does NOT include the blacklisted player. The blacklisted player keeps the orphaned entity forever on their client.
-
-### Correct Patterns
-
-**Option 1: Delete/stop BEFORE changing the filter**
+This applies to both entity-level and component-level filter changes:
 
 ```ts
-// Entity is replicated to all players including playerA
+// Entity visible to all
+server.set_networked(entity); // all players
 
-// Step 1: Remove entity while playerA can still see it
-server.stop_networked(entity); // sends deletion to all current members
-
-// Step 2: Now filter is irrelevant — entity is gone
+// Blacklist playerA — playerA receives entity deletion
 server.set_networked(entity, new Map([[playerA, false]]));
+
+// Component filter change — playerB loses only this component
+server.set_reliable(entity, Secret, new Map([[playerA, true]]));
+// Later, remove playerA from component filter
+server.set_reliable(entity, Secret, new Map([[playerC, true]]));
+// playerA receives component deletion
 ```
 
-**Option 2: Simply delete the entity**
+### Kept Behavior (keep=true)
+
+If you want to **keep the entity/component on the blacklisted player's client** (e.g. for hidden-but-persistent state), pass `keep=true`:
 
 ```ts
-world.delete(entity); // triggers __alive_tracking__ removal → stop_networked → deletion to all current members
-// filter blacklist is moot — entity is gone
+// Blacklist playerA but keep entity on their client
+server.set_networked(entity, new Map([[playerB, true]]), true);
+// playerA does NOT receive deletion — entity stays on their client
+// The system tracks that playerA still has the entity
 ```
 
-**Option 3: Don't blacklist — just stop networking and re-start with a new filter**
+When the entity is later stopped via `stop_networked(entity)` (without `keep=true`), **all kept players also receive deletions**:
 
 ```ts
-server.stop_networked(entity); // all members (including playerA) get deletion
-server.set_networked(entity, new Map([[playerA, false]])); // restart with new filter
-// playerA never sees the entity again; other players get a clean recreate
+// Kept players still tracked
+server.stop_networked(entity); // deletion sent to ALL including kept players
+
+// OR: discard kept data entirely (no deletions)
+server.stop_networked(entity, true); // nobody gets deletion
 ```
 
-### Why `move_entity_storage` Doesn't Generate Deletions
+### Component Filter Keep
 
-This is by design. Storage group migration is an internal routing optimization — it moves the entity's active entries, pending changes, and additions from one storage group to another. The system assumes the entity is continuous; only explicit `stop_networked` / `world:delete` generates lifecycle packets.
+The same `keep` parameter works for component filters:
+
+```ts
+// Remove playerA from component filter but keep data on their client
+server.set_reliable(entity, Health, new Map([[playerB, true]]), true);
+// playerA keeps the Health component data
+
+// Later when stopping the component, kept players get deletion too
+server.stop_reliable(entity, Health);
+```
+
+### Cleanup
+
+- **Player removal** (`server.remove_client(player)`): All kept and filter deletion data for that player is cleaned up
+- **Entity deletion** (`world.delete(entity)`): Kept deletions are flushed to filter deletions (sent as deletion packets), then all filter data is cleaned up
+- **Compact members**: Filter deletion bitmasks are remapped when player indices change
+
+### Data Structures
+
+The masking controller tracks filter deletions in two structures:
+
+```
+filter_deletions: {
+    entities: Map<Entity, Bitmask>,      // entity deletions to send
+    components: Map<Entity, Map<number, Map<Component, Bitmask>>>,  // component deletions
+}
+
+kept_deletions: {
+    // Same structure — held until entity stop or discarded
+}
+```
 
 ## Stop & Restart Behavior
 

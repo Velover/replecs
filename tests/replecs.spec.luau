@@ -6000,7 +6000,7 @@ TEST("filter blacklist", function()
 		end
 	end
 
-	CASE("blacklisted player keeps orphaned entity", function()
+	CASE("blacklisted player no longer keeps orphaned entity (default keep=false)", function()
 		local components = create_test_components(world)
 		server:init()
 
@@ -6021,19 +6021,18 @@ TEST("filter blacklist", function()
 		CHECK(client_entity(members[1], entity1) ~= nil)
 		CHECK(client_entity(members[2], entity1) ~= nil)
 
-		-- blacklist member1
+		-- blacklist member1 (default keep=false)
 		server:set_networked(entity1, { [members[2] :: any] = true })
 		apply_updates(members)
 
-		-- member1 still has the orphan (no deletion sent)
-		CHECK(client_entity(members[1], entity1) ~= nil)
-		CHECK(client_component(members[1], entity1, 1) == "value")
+		-- member1 now correctly receives entity deletion
+		CHECK(client_entity(members[1], entity1) == nil)
 
 		-- member2 still has it
 		CHECK(client_entity(members[2], entity1) ~= nil)
 	end)
 
-	CASE("world:delete after blacklist does not remove for blacklisted player", function()
+	CASE("world:delete after blacklist correctly removes for all players", function()
 		local components = create_test_components(world)
 		server:init()
 
@@ -6050,19 +6049,18 @@ TEST("filter blacklist", function()
 
 		full_sync(members, entity1)
 
-		-- blacklist member1
+		-- blacklist member1 (default keep=false sends deletion)
 		server:set_networked(entity1, { [members[2] :: any] = true })
 		apply_updates(members)
+
+		-- member1 correctly lost entity via filter deletion
+		CHECK(client_entity(members[1], entity1) == nil)
 
 		-- delete entity
 		world:delete(entity1)
 		apply_updates(members)
 
-		-- member1 STILL has the orphaned entity (deletion only went to current storage group)
-		CHECK(client_entity(members[1], entity1) ~= nil)
-		CHECK(client_component(members[1], entity1, 1) == "value")
-
-		-- member2 correctly lost it
+		-- member2 also correctly lost it
 		CHECK(client_entity(members[2], entity1) == nil)
 	end)
 
@@ -6207,6 +6205,967 @@ TEST("filter blacklist", function()
 		CHECK(client_component(members[2], entity1, 1) == "v2")
 		-- member1 is still nil
 		CHECK(client_entity(members[1], entity1) == nil)
+	end)
+end)
+
+TEST("filter deletions", function()
+	local world: jecs.World = nil :: any
+	local server: replecs.Server = nil :: any
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		server = replecs.create_server(world)
+	end)
+
+	AFTER_EACH(function()
+		server:destroy()
+	end)
+
+	local function create_members_data(count: number?)
+		local members = {} :: { MemberData }
+		for i = 1, (count or 3) do
+			local new_world = jecs.world()
+			local components = create_test_components(new_world)
+			local tags = create_test_tags(new_world)
+			local replicator = replecs.create_client(new_world)
+
+			local member_mt = {
+				world = new_world,
+				client = replicator,
+				components = components,
+				tags = tags,
+			}
+			local member = newproxy(true)
+			getmetatable(member).__index = member_mt
+
+			server.masking:register_client(member)
+			table.insert(members, member :: MemberData)
+		end
+		return members
+	end
+
+	local function client_entity(member: MemberData, server_entity: jecs.Entity): jecs.Entity?
+		local entity = member.client.server_ids[server_entity :: any]
+		if entity and member.world:contains(entity) then
+			return entity
+		end
+		return nil
+	end
+
+	local function client_component(member: MemberData, server_entity: jecs.Entity, component_index: number)
+		local component = member.components[component_index]
+		local entity = client_entity(member, server_entity)
+		if entity then
+			return member.world:get(entity, component)
+		end
+		return nil
+	end
+
+	local function init_and_activate(members: { MemberData })
+		for _, member in members do
+			server.masking:activate_client(member)
+			member.client:init()
+		end
+	end
+
+	local function full_sync(members: { MemberData })
+		for _, member in members do
+			local buf, variants = server:get_full(member :: any)
+			member.client:apply_full(buf, variants)
+		end
+	end
+
+	local function drain_updates(members: { MemberData })
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+	end
+
+	CASE("should send entity deletion to removed players when keep=false (default)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+				[members[3]] = true,
+			}
+		)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "hello")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- All members should see entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+
+		-- Change filter: remove member3 (default keep=false)
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			}
+		)
+
+		-- collect_updates should send entity deletion to member3
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+
+		-- member3 should no longer see entity
+		CHECK(client_entity(members[3], entity1) == nil)
+		-- members 1,2 should still see entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_component(members[1], entity1, 1) == "hello")
+		CHECK(client_component(members[2], entity1, 1) == "hello")
+	end)
+
+	CASE("should NOT send deletion when keep=true, but track kept players", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "secret")
+
+		drain_updates(members)
+		full_sync(members)
+
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+
+		-- Change filter with keep=true: exclude member3
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		-- collect_updates should NOT send entity deletion
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+
+		-- member3 should still see entity (no deletion sent)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[3], entity1, 1) == "secret")
+		-- members 1,2 should still see entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+
+		-- Check that kept_deletions has the entity for member3
+		local kept = server.masking.lookups.kept_deletions
+		CHECK(kept.entities[entity1] ~= nil)
+	end)
+
+	CASE("should flush kept deletions when entity is stopped (stop_networked without keep)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- keep=true: exclude member3
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		-- Drain updates (should be empty since keep=true)
+		drain_updates(members)
+
+		-- member3 still sees entity
+		CHECK(client_entity(members[3], entity1) ~= nil)
+
+		-- Now stop_networked without keep (default): should send deletions to ALL
+		-- including kept players
+		server:stop_networked(entity1)
+
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+
+		-- All members should no longer see entity
+		CHECK(client_entity(members[1], entity1) == nil)
+		CHECK(client_entity(members[2], entity1) == nil)
+		CHECK(client_entity(members[3], entity1) == nil)
+	end)
+
+	CASE("should discard kept deletions when entity is stopped with keep=true", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- keep=true: exclude member3
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- stop_networked with keep=true: no deletions sent
+		server:stop_networked(entity1, true)
+
+		local update_count = 0
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+			update_count += 1
+		end
+
+		-- member3 should still see entity (no deletion)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		-- members 1,2 should also still see entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+	end)
+
+	CASE("should send component deletion to removed players via component filter", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(
+			entity1,
+			components[2],
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+				[members[3]] = true,
+			}
+		)
+		world:set(entity1, components[1], "shared")
+		world:set(entity1, components[2], "filtered")
+
+		drain_updates(members)
+		full_sync(members)
+
+		CHECK(client_component(members[1], entity1, 2) == "filtered")
+		CHECK(client_component(members[2], entity1, 2) == "filtered")
+		CHECK(client_component(members[3], entity1, 2) == "filtered")
+
+		-- Change component filter: remove member3 (keep=false)
+		server:set_reliable(
+			entity1,
+			components[2],
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			}
+		)
+
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+
+		-- member3 should lose component2 but keep component1 and entity
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[3], entity1, 1) == "shared")
+		CHECK(client_component(members[3], entity1, 2) == nil)
+
+		-- members 1,2 should still have both
+		CHECK(client_component(members[1], entity1, 2) == "filtered")
+		CHECK(client_component(members[2], entity1, 2) == "filtered")
+	end)
+
+	CASE("should clean up filter deletions on player removal", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- keep=true: exclude member3
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- Verify kept_deletions has data for member3
+		local kept = server.masking.lookups.kept_deletions
+		CHECK(kept.entities[entity1] ~= nil)
+
+		-- Remove member3 (simulating player leaving)
+		server:remove_client(members[3] :: any)
+
+		-- kept_deletions bitmask should have member3's bit cleared
+		-- Since this was the only kept player, the bitmask should be empty
+		local kept_after = server.masking.lookups.kept_deletions
+		if kept_after.entities[entity1] then
+			CHECK(kept_after.entities[entity1]:is_zero())
+		end
+	end)
+
+	CASE("should clean up filter deletions on entity deletion", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- keep=true: exclude member3
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- Delete entity
+		world:delete(entity1)
+
+		-- Drain updates (deletions sent including flushed kept)
+		drain_updates(members)
+
+		-- All members should see entity deleted
+		CHECK(client_entity(members[1], entity1) == nil)
+		CHECK(client_entity(members[2], entity1) == nil)
+		CHECK(client_entity(members[3], entity1) == nil)
+
+		-- After cleanup, filter deletions should be empty for this entity
+		CHECK(server.masking.lookups.filter_deletions.entities[entity1] == nil)
+		CHECK(server.masking.lookups.filter_deletions.components[entity1] == nil)
+		CHECK(server.masking.lookups.kept_deletions.entities[entity1] == nil)
+		CHECK(server.masking.lookups.kept_deletions.components[entity1] == nil)
+	end)
+
+	CASE("no memory leak: repeated filter changes should not leak filter deletion data", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- Repeatedly change filter with keep=true then back
+		for i = 1, 10 do
+			-- Exclude member3 with keep=true
+			server:set_networked(
+				entity1,
+				filter {
+					[members[1]] = true,
+					[members[2]] = true,
+				},
+				true
+			)
+			-- Re-include everyone
+			server:set_networked(entity1)
+			-- Drain updates to prevent buildup
+			drain_updates(members)
+		end
+
+		-- No kept_deletions should remain (re-including clears them via fresh bitmask)
+		-- filter_deletions should also be clean after drain
+		local filter_del = server.masking.lookups.filter_deletions
+		CHECK(filter_del.entities[entity1] == nil)
+		CHECK(filter_del.components[entity1] == nil)
+	end)
+
+	CASE("no memory leak: player removal should clean all filter deletion bitmasks", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		local entity2 = world:entity()
+		server:set_networked(entity2)
+		server:set_reliable(entity2, components[1])
+		world:set(entity2, components[1], "data2")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- Exclude member3 with keep=true on both entities
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+		server:set_networked(
+			entity2,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- Both entities should have kept_deletions
+		CHECK(server.masking.lookups.kept_deletions.entities[entity1] ~= nil)
+		CHECK(server.masking.lookups.kept_deletions.entities[entity2] ~= nil)
+
+		-- Remove member3
+		server:remove_client(members[3] :: any)
+
+		-- Kept deletion bitmasks should have member3's bit cleared
+		local kept = server.masking.lookups.kept_deletions
+		if kept.entities[entity1] then
+			CHECK(kept.entities[entity1]:is_zero())
+		end
+		if kept.entities[entity2] then
+			CHECK(kept.entities[entity2]:is_zero())
+		end
+	end)
+
+	CASE("no memory leak: entity delete + player leave combination", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- keep=true: exclude member3
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- Delete entity
+		world:delete(entity1)
+		drain_updates(members)
+
+		-- Remove member3
+		server:remove_client(members[3] :: any)
+
+		-- All filter data should be cleaned
+		CHECK(server.masking.lookups.filter_deletions.entities[entity1] == nil)
+		CHECK(server.masking.lookups.filter_deletions.components[entity1] == nil)
+		CHECK(server.masking.lookups.kept_deletions.entities[entity1] == nil)
+		CHECK(server.masking.lookups.kept_deletions.components[entity1] == nil)
+
+		-- Entity lookup should be gone
+		CHECK(server.masking.lookups.entities[entity1] == nil)
+		CHECK(server.storage[entity1] == nil)
+	end)
+
+	CASE("should re-include kept player and clear their kept deletion entry", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "hello")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- All members should see entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+
+		-- Exclude member3 with keep=true
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		-- kept_deletions should track member3
+		CHECK(server.masking.lookups.kept_deletions.entities[entity1] ~= nil)
+
+		-- Re-include all members
+		server:set_networked(entity1)
+
+		drain_updates(members)
+
+		-- kept_deletions should be clean (re-including generates new bitmask that includes all)
+		local kept = server.masking.lookups.kept_deletions
+		if kept.entities[entity1] then
+			CHECK(kept.entities[entity1]:is_zero())
+		end
+
+		-- All members should still see entity with correct data
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[1], entity1, 1) == "hello")
+		CHECK(client_component(members[2], entity1, 1) == "hello")
+		CHECK(client_component(members[3], entity1, 1) == "hello")
+
+		-- Update value, all should receive it
+		world:set(entity1, components[1], "updated")
+		drain_updates(members)
+
+		CHECK(client_component(members[1], entity1, 1) == "updated")
+		CHECK(client_component(members[2], entity1, 1) == "updated")
+		CHECK(client_component(members[3], entity1, 1) == "updated")
+	end)
+
+	CASE("should handle re-inclusion after keep=true stop then re-start", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "before")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- Exclude member3 with keep=true
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- Stop entity (flushes kept deletions → filter deletions)
+		-- member3 should receive deletion
+		server:stop_networked(entity1)
+
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+
+		CHECK(client_entity(members[1], entity1) == nil)
+		CHECK(client_entity(members[2], entity1) == nil)
+		CHECK(client_entity(members[3], entity1) == nil)
+
+		-- Re-start entity with all members
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "after")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- All members should see entity with new data
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[1], entity1, 1) == "after")
+		CHECK(client_component(members[2], entity1, 1) == "after")
+		CHECK(client_component(members[3], entity1, 1) == "after")
+	end)
+
+	CASE("should clear filter_deletions when exclude (no keep) then immediately re-include", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "v1")
+
+		drain_updates(members)
+		full_sync(members)
+
+		CHECK(client_entity(members[3], entity1) ~= nil)
+
+		-- Exclude member3 without keep (default)
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			}
+		)
+
+		-- filter_deletions should have entity for member3
+		CHECK(server.masking.lookups.filter_deletions.entities[entity1] ~= nil)
+
+		-- Immediately re-include everyone (no drain in between)
+		server:set_networked(entity1)
+
+		-- filter_deletions should be cleared (member3 re-included)
+		local fd = server.masking.lookups.filter_deletions
+		if fd.entities[entity1] then
+			CHECK(fd.entities[entity1]:is_zero())
+		end
+
+		-- Drain should produce no deletions
+		drain_updates(members)
+
+		-- All members should still see entity
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[3], entity1, 1) == "v1")
+	end)
+
+	CASE("should re-include player after exclude (no keep) + drain (deletion already sent)", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "before")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- Exclude member3 without keep
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			}
+		)
+
+		-- Drain: deletion sent to member3
+		drain_updates(members)
+
+		-- member3 should no longer see entity
+		CHECK(client_entity(members[3], entity1) == nil)
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+
+		-- Re-include all members
+		server:set_networked(entity1)
+
+		-- Drain: member3 should receive the entity again via full sync
+		-- Need full sync since member3 missed the entity
+		drain_updates(members)
+		full_sync(members)
+
+		-- All members should see entity with data
+		CHECK(client_entity(members[1], entity1) ~= nil)
+		CHECK(client_entity(members[2], entity1) ~= nil)
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[3], entity1, 1) == "before")
+
+		-- Update value, all should receive it
+		world:set(entity1, components[1], "after")
+		drain_updates(members)
+
+		CHECK(client_component(members[1], entity1, 1) == "after")
+		CHECK(client_component(members[2], entity1, 1) == "after")
+		CHECK(client_component(members[3], entity1, 1) == "after")
+	end)
+
+	CASE("should NOT send spurious deletion to re-included player on stop after keep=true re-include", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "data")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- Exclude member3 with keep=true
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- Re-include member3
+		server:set_networked(entity1)
+
+		drain_updates(members)
+
+		-- Verify kept_deletions was cleaned for re-included player
+		local kept = server.masking.lookups.kept_deletions
+		if kept.entities[entity1] then
+			CHECK(kept.entities[entity1]:is_zero())
+		end
+
+		-- member3 should still see entity
+		CHECK(client_entity(members[3], entity1) ~= nil)
+
+		-- Now stop without keep — should only send deletion for entity-level stop
+		-- NOT for the stale kept entry (which was cleaned)
+		server:stop_networked(entity1)
+
+		for player, buf, changes in server:collect_updates() do
+			local member: MemberData = player :: any
+			member.client:apply_updates(buf, changes)
+		end
+
+		-- All should see entity deleted
+		CHECK(client_entity(members[1], entity1) == nil)
+		CHECK(client_entity(members[2], entity1) == nil)
+		CHECK(client_entity(members[3], entity1) == nil)
+	end)
+
+	CASE("should re-include player after exclude (no keep) + drain and receive subsequent updates", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		world:set(entity1, components[1], "v1")
+
+		drain_updates(members)
+		full_sync(members)
+
+		-- Exclude member3 without keep
+		server:set_networked(
+			entity1,
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			}
+		)
+
+		-- Drain: deletion sent
+		drain_updates(members)
+		CHECK(client_entity(members[3], entity1) == nil)
+
+		-- Update value while member3 is excluded
+		world:set(entity1, components[1], "v2")
+		drain_updates(members)
+
+		-- member1,2 should have v2
+		CHECK(client_component(members[1], entity1, 1) == "v2")
+		CHECK(client_component(members[2], entity1, 1) == "v2")
+
+		-- Re-include all members
+		server:set_networked(entity1)
+
+		-- Drain + full sync so member3 gets the entity back
+		drain_updates(members)
+		full_sync(members)
+
+		-- member3 should now have entity with latest value
+		CHECK(client_entity(members[3], entity1) ~= nil)
+		CHECK(client_component(members[3], entity1, 1) == "v2")
+
+		-- Update value again, all should receive
+		world:set(entity1, components[1], "v3")
+		drain_updates(members)
+
+		CHECK(client_component(members[1], entity1, 1) == "v3")
+		CHECK(client_component(members[2], entity1, 1) == "v3")
+		CHECK(client_component(members[3], entity1, 1) == "v3")
+	end)
+
+	CASE("should re-include player on component filter after keep=true exclusion", function()
+		local components = create_test_components(world)
+		server:init()
+
+		local members = create_members_data(3)
+		init_and_activate(members)
+		full_sync(members)
+
+		local entity1 = world:entity()
+		server:set_networked(entity1)
+		server:set_reliable(entity1, components[1])
+		server:set_reliable(
+			entity1,
+			components[2],
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+				[members[3]] = true,
+			}
+		)
+		world:set(entity1, components[1], "base")
+		world:set(entity1, components[2], "filtered")
+
+		drain_updates(members)
+		full_sync(members)
+
+		CHECK(client_component(members[3], entity1, 2) == "filtered")
+
+		-- Exclude member3 from component filter with keep=true
+		server:set_reliable(
+			entity1,
+			components[2],
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+			},
+			true
+		)
+
+		drain_updates(members)
+
+		-- member3 still sees component (keep=true, no deletion sent)
+		CHECK(client_component(members[3], entity1, 2) == "filtered")
+
+		-- Re-include member3 in component filter
+		server:set_reliable(
+			entity1,
+			components[2],
+			filter {
+				[members[1]] = true,
+				[members[2]] = true,
+				[members[3]] = true,
+			}
+		)
+
+		drain_updates(members)
+
+		-- Update component value
+		world:set(entity1, components[2], "updated_filtered")
+		drain_updates(members)
+
+		-- All members should receive the update
+		CHECK(client_component(members[1], entity1, 2) == "updated_filtered")
+		CHECK(client_component(members[2], entity1, 2) == "updated_filtered")
+		CHECK(client_component(members[3], entity1, 2) == "updated_filtered")
 	end)
 end)
 

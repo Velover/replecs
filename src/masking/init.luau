@@ -73,6 +73,11 @@ export type EntityChanges = {
 
 type PostponedList = ComponentIndex<{ filter: MemberFilter? }>
 
+export type FilterDeletions = {
+	entities: Map<Entity, Bitmask>,
+	components: Map<Entity, Map<number, Map<Component, Bitmask>>>,
+}
+
 type LookupsList = {
 	entities: Map<Entity, EntityLookup>,
 
@@ -80,10 +85,8 @@ type LookupsList = {
 		entities: Map<Entity, Lookup>,
 		components: EntityComponentIndex<Lookup>,
 	},
-	filter_deltas: {
-		entities: Map<Entity, Map<Entity, boolean>>,
-		components: EntityComponentIndex<Map<Entity, boolean>>,
-	},
+	filter_deletions: FilterDeletions,
+	kept_deletions: FilterDeletions,
 
 	postponed: { [Entity]: PostponedList },
 }
@@ -160,6 +163,87 @@ local masking_controller = {}
 masking_controller.__index = masking_controller
 
 export type MaskingController = MaskingControllerClass & typeof(masking_controller)
+
+local function create_filter_deletions(): FilterDeletions
+	return {
+		entities = {},
+		components = {},
+	}
+end
+
+local function merge_filter_bitmask(target: Bitmask, source: Bitmask)
+	target:bor_into(source)
+end
+
+local function add_entity_filter_deletion(deletions: FilterDeletions, entity: Entity, bitmask: Bitmask)
+	local existing = deletions.entities[entity]
+	if existing then
+		deletions.entities[entity] = merge_filter_bitmask(existing, bitmask)
+	else
+		deletions.entities[entity] = bitmask
+	end
+end
+
+local function add_component_filter_deletion(
+	deletions: FilterDeletions,
+	entity: Entity,
+	component_type: number,
+	component: Component,
+	bitmask: Bitmask
+)
+	local entity_map = deletions.components[entity]
+	if not entity_map then
+		entity_map = {}
+		deletions.components[entity] = entity_map
+	end
+	local type_map = entity_map[component_type]
+	if not type_map then
+		type_map = {}
+		entity_map[component_type] = type_map
+	end
+	local existing = type_map[component]
+	if existing then
+		type_map[component] = merge_filter_bitmask(existing, bitmask)
+	else
+		type_map[component] = bitmask
+	end
+end
+
+local function clear_entity_filter_deletions(deletions: FilterDeletions, entity: Entity)
+	deletions.entities[entity] = nil
+	deletions.components[entity] = nil
+end
+
+local function clear_member_from_bitmask(bitmask: Bitmask, index: number)
+	if bitmask:get(index) then
+		bitmask:clear(index)
+	end
+end
+
+local function clear_member_from_filter_deletions(deletions: FilterDeletions, member: Member, index: number)
+	for entity, bitmask in deletions.entities do
+		clear_member_from_bitmask(bitmask, index)
+		if bitmask:is_zero() then
+			deletions.entities[entity] = nil
+		end
+	end
+	for entity, entity_map in deletions.components do
+		for component_type, type_map in entity_map do
+			for component, bitmask in type_map do
+				clear_member_from_bitmask(bitmask, index)
+				if bitmask:is_zero() then
+					type_map[component] = nil
+				end
+			end
+			if next(type_map) == nil then
+				entity_map[component_type] = nil
+			end
+		end
+		if next(entity_map) == nil then
+			deletions.components[entity] = nil
+		end
+	end
+end
 
 function masking_controller.get_clients_from_bitmask(controller: MaskingController, bitmask: Bitmask): Array<Member>
 	local members: { Member } = {}
@@ -861,15 +945,109 @@ function masking_controller.start_entity(masking: MaskingController, entity: Ent
 	end
 end
 
-function masking_controller.set_entity(masking: MaskingController, entity: Entity, given_filter: GivenFilter?)
+function masking_controller.set_entity(
+	masking: MaskingController,
+	entity: Entity,
+	given_filter: GivenFilter?,
+	keep: boolean?
+)
 	local filter = get_usable_filter(given_filter)
 	local lookup = masking.lookups.entities[entity]
 	if not lookup then
 		common.log_error "attempted to modify the filter of an unactive entity"
 	end
+
+	-- Capture old bitmask before changing
+	local old_bitmask = lookup.generator.result
+
 	lookup.generator:destroy()
 
 	local generator = masking:update_entity_filter(entity, filter)
+
+	-- Compute delta: players who had the entity but won't after the change
+	local removed_bitmask = old_bitmask:band_not(generator.result)
+
+	-- Clear re-included players from kept_deletions to prevent stale flush on stop
+	local added_bitmask = generator.result:band_not(old_bitmask)
+	if not added_bitmask:is_zero() then
+		-- Players re-included: clear their bits from both deletion maps
+		local kept = masking.lookups.kept_deletions
+		local kept_entity = kept.entities[entity]
+		if kept_entity then
+			local cleared = kept_entity:band_not(added_bitmask)
+			if cleared:is_zero() then
+				kept.entities[entity] = nil
+			else
+				kept.entities[entity] = cleared
+			end
+		end
+		local kept_entity_comps = kept.components[entity]
+		if kept_entity_comps then
+			for component_type, type_map in kept_entity_comps do
+				for component, bitmask in type_map do
+					local cleared = bitmask:band_not(added_bitmask)
+					if cleared:is_zero() then
+						type_map[component] = nil
+					else
+						type_map[component] = cleared
+					end
+				end
+				if next(type_map) == nil then
+					kept_entity_comps[component_type] = nil
+				end
+			end
+			if next(kept_entity_comps) == nil then
+				kept.components[entity] = nil
+			end
+		end
+		-- Also clear from filter_deletions (in case collect_updates hasn't run yet)
+		local fd = masking.lookups.filter_deletions
+		local fd_entity = fd.entities[entity]
+		if fd_entity then
+			local cleared = fd_entity:band_not(added_bitmask)
+			if cleared:is_zero() then
+				fd.entities[entity] = nil
+			else
+				fd.entities[entity] = cleared
+			end
+		end
+		local fd_entity_comps = fd.components[entity]
+		if fd_entity_comps then
+			for component_type, type_map in fd_entity_comps do
+				for component, bitmask in type_map do
+					local cleared = bitmask:band_not(added_bitmask)
+					if cleared:is_zero() then
+						type_map[component] = nil
+					else
+						type_map[component] = cleared
+					end
+				end
+				if next(type_map) == nil then
+					fd_entity_comps[component_type] = nil
+				end
+			end
+			if next(fd_entity_comps) == nil then
+				fd.components[entity] = nil
+			end
+		end
+	end
+
+	-- Store deletions based on keep flag
+	if not removed_bitmask:is_zero() then
+		local target_deletions = if keep then masking.lookups.kept_deletions else masking.lookups.filter_deletions
+		add_entity_filter_deletion(target_deletions, entity, removed_bitmask)
+
+		-- Also mark filtered components for deletion to removed players
+		for component_type, components in lookup.filtered_components do
+			for component, component_lookup in components do
+				local old_comp_bitmask = component_lookup.band_generator.result
+				local removed_comp = old_comp_bitmask:band(removed_bitmask)
+				if not removed_comp:is_zero() then
+					add_component_filter_deletion(target_deletions, entity, component_type, component, removed_comp)
+				end
+			end
+		end
+	end
 
 	lookup.generator = generator
 	lookup.filter = filter
@@ -878,7 +1056,7 @@ function masking_controller.set_entity(masking: MaskingController, entity: Entit
 	masking:rebind_component_generators(entity)
 end
 
-function masking_controller.stop_entity(masking: MaskingController, entity: Entity)
+function masking_controller.stop_entity(masking: MaskingController, entity: Entity, keep: boolean?)
 	local lookup = masking.lookups.entities[entity]
 	if not lookup then
 		common.log_error "attemped to stop an unactive entity"
@@ -921,6 +1099,39 @@ function masking_controller.stop_entity(masking: MaskingController, entity: Enti
 	lookup.storage_group.changes.changed[entity] = nil
 	lookup.storage_group.changes.added_components[entity] = nil
 
+	-- Flush kept deletions into filter deletions (entity is being stopped, kept players need deletions too)
+	-- If keep=true (stop without sending deletions), discard kept data instead
+	local kept = masking.lookups.kept_deletions
+	if not keep then
+		local kept_entity_bitmask = kept.entities[entity]
+		if kept_entity_bitmask then
+			add_entity_filter_deletion(masking.lookups.filter_deletions, entity, kept_entity_bitmask)
+		end
+		local kept_entity_components = kept.components[entity]
+		if kept_entity_components then
+			local filter_comps = masking.lookups.filter_deletions.components
+			if not filter_comps[entity] then
+				filter_comps[entity] = {}
+			end
+			for component_type, type_map in kept_entity_components do
+				if not filter_comps[entity][component_type] then
+					filter_comps[entity][component_type] = {}
+				end
+				for component, bitmask in type_map do
+					add_component_filter_deletion(
+						masking.lookups.filter_deletions,
+						entity,
+						component_type,
+						component,
+						bitmask
+					)
+				end
+			end
+		end
+	end
+	kept.entities[entity] = nil
+	kept.components[entity] = nil
+
 	masking.lookups.entities[entity] = nil
 end
 
@@ -929,6 +1140,9 @@ function masking_controller.cleanup_entity(masking: MaskingController, entity: E
 	masking.lookups.postponed[entity] = nil
 	masking.lookups.deletions.entities[entity] = nil
 	masking.lookups.deletions.components[entity] = nil
+	-- Note: filter_deletions and kept_deletions are NOT cleared here.
+	-- They are consumed and cleared by collect_updates.
+	-- kept_deletions are flushed into filter_deletions during stop_entity.
 end
 
 function masking_controller.update_component_filter(
@@ -983,7 +1197,8 @@ function masking_controller.set_component(
 	entity: Entity,
 	component: Component,
 	component_type: number,
-	given_filter: GivenFilter?
+	given_filter: GivenFilter?,
+	keep: boolean?
 )
 	local filter = get_usable_filter(given_filter)
 	local lookup = masking:get_or_postpone_entity_lookup(entity, component, component_type, filter)
@@ -994,6 +1209,16 @@ function masking_controller.set_component(
 
 	if filter == nil then
 		if component_lookup ~= nil then
+			-- Merging component filter back to entity: compute delta for removed players
+			local old_comp_bitmask = component_lookup.band_generator.result
+			local entity_bitmask = lookup.generator.result
+			-- When merging, component moves to entity mask. Players removed = old component bitmask AND NOT entity bitmask
+			local removed_bitmask = old_comp_bitmask:band_not(entity_bitmask)
+			if not removed_bitmask:is_zero() then
+				local target_deletions = if keep then masking.lookups.kept_deletions else masking.lookups.filter_deletions
+				add_component_filter_deletion(target_deletions, entity, component_type, component, removed_bitmask)
+			end
+
 			component_lookup.band_generator:destroy()
 			component_lookup.generator:destroy()
 
@@ -1005,6 +1230,47 @@ function masking_controller.set_component(
 	local generator, band_generator = masking:update_component_filter(entity, component, component_type, filter)
 
 	if component_lookup ~= nil then
+		-- Compute delta for removed players before changing
+		local old_comp_bitmask = component_lookup.band_generator.result
+		local removed_bitmask = old_comp_bitmask:band_not(band_generator.result)
+		if not removed_bitmask:is_zero() then
+			local target_deletions = if keep then masking.lookups.kept_deletions else masking.lookups.filter_deletions
+			add_component_filter_deletion(target_deletions, entity, component_type, component, removed_bitmask)
+		end
+
+		-- Clear re-included players from stale component deletion entries
+		local added_comp_bitmask = band_generator.result:band_not(old_comp_bitmask)
+		if not added_comp_bitmask:is_zero() then
+			local function clear_component_entry(deletions: FilterDeletions)
+				local entity_map = deletions.components[entity]
+				if not entity_map then
+					return
+				end
+				local type_map = entity_map[component_type]
+				if not type_map then
+					return
+				end
+				local existing = type_map[component]
+				if not existing then
+					return
+				end
+				local cleared = existing:band_not(added_comp_bitmask)
+				if cleared:is_zero() then
+					type_map[component] = nil
+				else
+					type_map[component] = cleared
+				end
+				if next(type_map) == nil then
+					entity_map[component_type] = nil
+				end
+				if next(entity_map) == nil then
+					deletions.components[entity] = nil
+				end
+			end
+			clear_component_entry(masking.lookups.kept_deletions)
+			clear_component_entry(masking.lookups.filter_deletions)
+		end
+
 		component_lookup.band_generator:destroy()
 		component_lookup.generator:destroy()
 
@@ -1546,6 +1812,22 @@ function masking_controller.compact_members(masking: MaskingController)
 		end
 	end
 	masking.storages = new_storages
+
+	-- Remap filter deletion bitmasks
+	local function remap_filter_deletions(deletions: FilterDeletions)
+		for entity, bitmask in deletions.entities do
+			deletions.entities[entity] = remap_bitmask(bitmask, old_indexes, new_indexes, new_count)
+		end
+		for entity, entity_map in deletions.components do
+			for component_type, type_map in entity_map do
+				for component, bitmask in type_map do
+					type_map[component] = remap_bitmask(bitmask, old_indexes, new_indexes, new_count)
+				end
+			end
+		end
+	end
+	remap_filter_deletions(masking.lookups.filter_deletions)
+	remap_filter_deletions(masking.lookups.kept_deletions)
 end
 
 function masking_controller.create_generator_from_filter(
@@ -1640,6 +1922,10 @@ function masking_controller.unregister_client(masking: MaskingController, member
 	if index == nil then
 		return
 	end
+	-- Clean up filter deletions for this member
+	clear_member_from_filter_deletions(masking.lookups.filter_deletions, member, index)
+	clear_member_from_filter_deletions(masking.lookups.kept_deletions, member, index)
+
 	masking.client_indexes[member] = nil
 	masking.all_members_generator.bitmask:clear(index)
 	masking.active_members_generator:compute()
@@ -1678,10 +1964,8 @@ local function create(): MaskingController
 			entities = {},
 			components = {},
 		},
-		filter_deltas = {
-			entities = {},
-			components = {},
-		},
+		filter_deletions = create_filter_deletions(),
+		kept_deletions = create_filter_deletions(),
 		postponed = {},
 	}
 	self.unreplicated = {}

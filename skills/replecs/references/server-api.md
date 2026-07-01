@@ -21,19 +21,30 @@ Unhooks all observers and disconnects events. The server can no longer be used a
 
 ## Entity Tracking
 
-### `server.set_networked(entity, filter?: MemberFilter)`
+### `server.set_networked(entity, filter?: MemberFilter, keep?: boolean)`
 
 Marks an entity as networked. If already networked, updates the player filter. This is required before tracking individual components — components can only be replicated on networked entities.
+
+When changing the filter on an already-networked entity:
+
+- `keep=false` (default): players removed from the filter receive entity deletion packets
+- `keep=true`: removed players keep the entity on their client; tracked internally for later cleanup
 
 ```ts
 server.set_networked(entity); // all players
 server.set_networked(entity, new Map([[p1, true]])); // specific players
 server.set_networked(entity, (player) => player.Team === "Red"); // function filter
+server.set_networked(entity, new Map([[p1, true]]), true); // keep=true: excluded players retain entity
 ```
 
-### `server.set_reliable(entity, component, filter?: MemberFilter)`
+### `server.set_reliable(entity, component, filter?: MemberFilter, keep?: boolean)`
 
 Tracks a component for **reliable** replication. Changes are delta-tracked and only sent when the value actually changes. If already tracked, updates the filter.
+
+When changing the filter:
+
+- `keep=false` (default): removed players receive component deletion packets
+- `keep=true`: removed players keep the component data; tracked for later cleanup
 
 Works with: regular components, tags, and pairs.
 
@@ -41,9 +52,10 @@ Works with: regular components, tags, and pairs.
 server.set_reliable(entity, Health); // reliable component
 server.set_reliable(entity, IsAlive); // tag (boolean)
 server.set_reliable(entity, MyPair, filter); // with filter
+server.set_reliable(entity, Health, new Map([[p1, true]]), true); // keep=true
 ```
 
-### `server.set_unreliable(entity, component, filter?: MemberFilter)`
+### `server.set_unreliable(entity, component, filter?: MemberFilter, keep?: boolean)`
 
 Tracks a component for **unreliable** replication. The current value is sent every frame (snapshot), regardless of whether it changed. Automatically splits packets at the 1KB boundary.
 
@@ -52,7 +64,7 @@ server.set_unreliable(entity, Position);
 server.set_unreliable(entity, Velocity, filter);
 ```
 
-### `server.set_pair(entity, id, filter?: MemberFilter)`
+### `server.set_pair(entity, id, filter?: MemberFilter, keep?: boolean)`
 
 Tracks a jecs pair for replication. The pair **must exist in the world before calling `set_pair`**, because Replecs snapshots the current value for the initial sync.
 
@@ -68,7 +80,7 @@ server.set_pair(entity, pair(ChildOf, parent));
 world.add(entity, pair(ChildOf, parent));
 ```
 
-### `server.set_relation(entity, relation, filter?: MemberFilter)`
+### `server.set_relation(entity, relation, filter?: MemberFilter, keep?: boolean)`
 
 Tracks a jecs relation (and all its targets) for replication.
 
