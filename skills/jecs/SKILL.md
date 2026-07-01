@@ -28,7 +28,12 @@ const Position = world.component<Vector3>();
 const Health = world.component<number>();
 
 // Tags (no data, zero storage)
+// Use Jecs.tag() for local-only tags that don't need replication
 const Dead = Jecs.tag();
+// For tags that will be replicated (e.g. via ReplecsExtended),
+// use world.component() as Jecs.Tag after world creation instead:
+//   const ReplicatedTag = world.component() as Jecs.Tag;
+//   const ReplicatedTag = world.component<Tag>(); // in TypeScript
 
 // Create entity and attach data
 const entity = world.entity();

@@ -1,7 +1,7 @@
 ---
 name: core-basics
 description: |
-    Use when creating worlds, entities, components, tags, or singletons in jecs
+  Use when creating worlds, entities, components, tags, or singletons in jecs
 ---
 
 # Jecs Core Basics
@@ -85,7 +85,7 @@ world.clear(entityId);
 Tags are components with no data (zero storage cost).
 
 ```ts
-// Create tag (before world)
+// Preregistered tag (before world) — good for local-only, non-replicated tags
 const Dead = Jecs.tag();
 
 // Or use regular entity as tag
@@ -101,6 +101,28 @@ world.remove(entityId, Dead);
 ```
 
 **Key Difference:** `world.add()` for tags, `world.set()` for data components.
+
+### Tags for Replication
+
+If a tag-like component needs to be replicated (e.g. via ReplecsExtended), **do not use
+`Jecs.tag()`**. Preregistered tags are created before the world exists and may not integrate
+correctly with replication tracking. Instead, use `world.component()` after world creation:
+
+```ts
+import type { Tag } from "@rbxts/jecs";
+
+const world = Jecs.world();
+
+// ✅ Tag-like component created within the world — replication-compatible
+const Dead = world.component() as Jecs.Tag;
+const Stunned = world.component() as Jecs.Tag;
+
+// ❌ Avoid for replicated tags — created before world via preregistration
+// const Dead = Jecs.tag();
+```
+
+Use `Jecs.tag()` only for local-only tags that will never be replicated (e.g. a local `Dirty`
+flag for change tracking).
 
 ## Singletons
 

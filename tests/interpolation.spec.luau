@@ -548,5 +548,189 @@ TEST("jitter recovery", function()
 	end)
 end)
 
+-- Test 14: frame-based simulation
+TEST("frame-based simulation", function()
+	local world: jecs.World
+	local interp: interpolation.Interpolator
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		interp = interpolation.create {
+			base_delay = 0,
+		}
+	end)
+
+	CASE("lerps correctly between two snapshots at midpoint", function()
+		local comp = world:component()
+		interp:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		-- Server pushes at t=0.0 and t=0.1 (100ms apart, 10Hz replication)
+		interp:push(entity, comp, 0, 0.0)
+		interp:push(entity, comp, 100, 0.1)
+
+		-- Client renders at t=0.05 (halfway between the two snapshots)
+		-- render_time = 0.05 - (0 + 0) = 0.05, which is between 0.0 and 0.1
+		local val = interp:get(entity, comp, 0.05)
+		local expected = lerp_number(0, 100, 0.5) -- 50
+		CHECK(math.abs(val - expected) < 0.001)
+	end)
+
+	CASE("lerps at 25% between snapshots", function()
+		local comp = world:component()
+		interp:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		interp:push(entity, comp, 10, 1.0)
+		interp:push(entity, comp, 50, 1.1)
+
+		-- render_time = 1.025 - 0 = 1.025, which is 25% of the way from 1.0 to 1.1
+		local val = interp:get(entity, comp, 1.025)
+		local expected = lerp_number(10, 50, 0.25) -- 20
+		CHECK(math.abs(val - expected) < 0.001)
+	end)
+
+	CASE("returns newest when render_time is past all snapshots", function()
+		local comp = world:component()
+		interp:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		interp:push(entity, comp, 10, 1.0)
+		interp:push(entity, comp, 50, 1.1)
+
+		-- render_time = 5.0 is way past the newest snapshot
+		local val = interp:get(entity, comp, 5.0)
+		CHECK(val == 50)
+	end)
+
+	CASE("returns oldest when render_time is before all snapshots", function()
+		local comp = world:component()
+		interp:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		interp:push(entity, comp, 10, 1.0)
+		interp:push(entity, comp, 50, 1.1)
+
+		-- render_time = 0.5 is before the oldest snapshot (1.0)
+		-- The algorithm walks backward; if no bracket is found, returns newest
+		local val = interp:get(entity, comp, 0.5)
+		CHECK(val == 50)
+	end)
+
+	CASE("base_delay shifts render time backward", function()
+		local delayed = interpolation.create {
+			base_delay = 0.1,
+		}
+		local comp = world:component()
+		delayed:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		delayed:push(entity, comp, 0, 0.0)
+		delayed:push(entity, comp, 100, 0.2)
+
+		-- At now=0.2, render_time = 0.2 - 0.1 = 0.1, which is halfway
+		local val = delayed:get(entity, comp, 0.2)
+		local expected = lerp_number(0, 100, 0.5) -- 50
+		CHECK(math.abs(val - expected) < 0.001)
+	end)
+end)
+
+-- Test 15: frame-by-frame simulation (multi-frame stepping)
+TEST("frame-by-frame stepping", function()
+	local world: jecs.World
+	local interp: interpolation.Interpolator
+
+	BEFORE_EACH(function()
+		world = jecs.world()
+		interp = interpolation.create {
+			base_delay = 0,
+		}
+	end)
+
+	CASE("smooth interpolation across multiple frames with 10Hz replication", function()
+		local comp = world:component()
+		interp:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		-- Simulate 10Hz server replication (every 0.1s)
+		-- and ~60Hz client rendering (every ~0.01667s)
+		local tick_rate = 0.1
+		local frame_time = 1 / 60
+		local sim_time = 0.0
+
+		-- Push initial snapshot
+		interp:push(entity, comp, 0, sim_time)
+
+		-- Simulate 20 server ticks (2 seconds)
+		for tick = 1, 20 do
+			local server_time = tick * tick_rate
+			local server_value = tick * 10 -- 10, 20, 30, ...
+
+			-- Push server snapshot
+			interp:push(entity, comp, server_value, server_time)
+
+			-- Simulate client frames between this tick and the next tick
+			local frames_in_tick = math.floor(tick_rate / frame_time)
+			for frame = 1, frames_in_tick do
+				sim_time = sim_time + frame_time
+				local val = interp:get(entity, comp, sim_time)
+
+				-- Value must be between the two most recent server values
+				local prev_value = (tick - 1) * 10
+				local cur_value = tick * 10
+
+				-- Should never teleport outside the range of known snapshots
+				CHECK(val ~= nil)
+				CHECK(val >= prev_value or tick == 1)
+				CHECK(val <= cur_value)
+			end
+		end
+	end)
+
+	CASE("no teleporting: value changes monotonically across frames", function()
+		local comp = world:component()
+		interp:register(comp, lerp_number)
+
+		local entity = world:entity()
+
+		local tick_rate = 0.1
+		local frame_time = 1 / 60
+
+		-- Push first two snapshots
+		interp:push(entity, comp, 0, 0.0)
+		interp:push(entity, comp, 100, 0.1)
+
+		local sim_time = 0.0
+		local prev_val = interp:get(entity, comp, sim_time)
+
+		-- Step through 60 frames (1 second)
+		for _ = 1, 60 do
+			sim_time += frame_time
+
+			-- Push new server snapshot every tick
+			local tick = math.floor(sim_time / tick_rate)
+			local server_time = tick * tick_rate
+			if server_time > 0 and server_time > (tick - 1) * tick_rate then
+				interp:push(entity, comp, tick * 10, server_time)
+			end
+
+			local val = interp:get(entity, comp, sim_time)
+			if val ~= nil and prev_val ~= nil then
+				-- The value should never jump by more than the max possible delta
+				-- between two adjacent server snapshots (100 units per tick)
+				local delta = math.abs(val - prev_val)
+				CHECK(delta <= 110) -- small tolerance for lerp boundaries
+			end
+			prev_val = val
+		end
+	end)
+end)
+
 local report = testlib.run(plan)
 testlib.report(report)

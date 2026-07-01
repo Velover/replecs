@@ -73,13 +73,15 @@ client.override("changed", Position, (entity, id, value, added) => {
 });
 ```
 
-### `interp.get<T>(entity, component): T | undefined`
+### `interp.get<T>(entity, component, now?): T | undefined`
 
 Get the interpolated value for an entity/component. Returns `nil` if no snapshots exist.
 
-Internally computes `render_time = os.clock() - (base_delay + jitter)`, finds two bracketing snapshots, and lerps between them. If `render_time` is past the newest snapshot, returns the newest value directly.
+- `now` (optional): the current time in the same domain as push timestamps. If omitted, defaults to `os.clock()`.
+- Internally computes `render_time = now - (base_delay + jitter)`, finds two bracketing snapshots, and lerps between them. If `render_time` is past the newest snapshot, returns the newest value directly.
 
 ```ts
+// Default: uses os.clock() automatically
 function INTERPOLATION_SYSTEM() {
   for (const [entity, pos] of world.query(Position)) {
     const interpolated = interp.get(entity, Position);
@@ -89,6 +91,10 @@ function INTERPOLATION_SYSTEM() {
     }
   }
 }
+
+// Custom time: useful for fixed-timestep simulations or testing
+const simTime = os.clock() - startTime;
+const interpolated = interp.get(entity, Position, simTime);
 ```
 
 ### `interp.remove_entity(entity)`

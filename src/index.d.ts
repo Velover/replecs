@@ -310,8 +310,8 @@ declare namespace Replecs {
     /** Push a new snapshot. Call from a hook/override callback. */
     push<T>(entity: Entity, component: Entity<T>, value: T, time: number): void;
 
-    /** Get the interpolated value. Returns undefined if no snapshots exist. */
-    get<T>(entity: Entity, component: Entity<T>): T | undefined;
+    /** Get the interpolated value. Returns undefined if no snapshots exist. `now` overrides os.clock(). */
+    get<T>(entity: Entity, component: Entity<T>, now?: number): T | undefined;
 
     /** Remove all buffered state for an entity. */
     remove_entity(entity: Entity): void;

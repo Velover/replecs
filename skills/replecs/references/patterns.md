@@ -397,6 +397,49 @@ function INTERPOLATION_SYSTEM() {
 
 ---
 
+## Tag Components for Replication
+
+When creating tag-like components (no data) for use with ReplecsExtended replication, avoid
+`Jecs.tag()`. Preregistered tags are created before the world exists and may not integrate
+correctly with the replicator's component tracking hooks.
+
+```ts
+import Jecs, { World } from "@rbxts/jecs";
+import type { Tag } from "@rbxts/jecs";
+
+// ❌ Preregistered tag — created before world, not compatible with replication tracking
+const Dead = Jecs.tag();
+const Stunned = Jecs.tag();
+
+const world = new World();
+const replicator = Replecs.create(world);
+
+// ❌ This may not be tracked correctly
+server.set_reliable(entity, Dead);
+```
+
+```ts
+import { World } from "@rbxts/jecs";
+import type { Tag } from "@rbxts/jecs";
+
+// ✅ Created within the world — fully compatible with replication
+const world = new World();
+const replicator = Replecs.create(world);
+
+const Dead = world.component<Tag>();
+const Stunned = world.component<Tag>();
+
+// ✅ Tracked correctly by the replicator
+server.set_reliable(entity, Dead);
+world.add(entity, Stunned); // add (not set) for tag-like components
+```
+
+**Rule of thumb:** Any component that will be replicated via ReplecsExtended should be created
+with `world.component()` after the world exists. Use `Jecs.tag()` only for local-only,
+non-replicated tags (e.g. a local `Dirty` flag for change tracking).
+
+---
+
 ## Anti-Patterns
 
 ### ❌ Forgetting `set_networked`
@@ -440,4 +483,17 @@ for (const [player, buf, variants] of server.collect_updates()) {
   // If you don't send, the data is lost.
   SendToPlayer(player, buf, variants);
 }
+```
+
+### ❌ Using `Jecs.tag()` for replicated components
+
+```ts
+import Jecs from "@rbxts/jecs";
+const Dead = Jecs.tag(); // Preregistered before world
+const world = new World();
+// Replicator may not correctly track preregistered tags
+server.set_reliable(entity, Dead);
+// Fix: use world.component() as Jecs.Tag instead
+const Dead = world.component() as Jecs.Tag;
+server.set_reliable(entity, Dead);
 ```

@@ -115,12 +115,14 @@ end
 --[[
 	Get the interpolated value for an entity/component.
 	Returns nil if no snapshots exist.
-	
-	Render time = os.clock() - (base_delay + jitter)
+
+	`now` (optional): the current time in the same domain as push timestamps.
+		If omitted, defaults to os.clock().
+	Render time = now - (base_delay + jitter)
 	Finds two bracketing snapshots and lerps between them.
 	If render_time is past the newest snapshot, returns the newest value.
 ]]
-function interpolator.get(self: Interpolator, entity: Entity, component: Component): any
+function interpolator.get(self: Interpolator, entity: Entity, component: Component, now: number?): any
 	local entity_buf = self.buffers[entity]
 	if not entity_buf then
 		return nil
@@ -133,7 +135,7 @@ function interpolator.get(self: Interpolator, entity: Entity, component: Compone
 
 	local max = self.max_snapshots
 	local lerp = self.lerps[component]
-	local render_time = os.clock() - (self.base_delay + self.jitter)
+	local render_time = (now or os.clock()) - (self.base_delay + self.jitter)
 
 	-- Only one snapshot: return it directly
 	if ring.count == 1 then

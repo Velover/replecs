@@ -71,6 +71,29 @@ const replicator = Replecs.create(world);
 
 ### 2. Define components & serdes
 
+> **⚠ Tag Components for Replication:** When defining tag-like components (no data) that
+> will be used with ReplecsExtended replication, **do not use `Jecs.tag()`**. Preregistered
+> tags (via `Jecs.tag()`) are created before world existence and may not integrate correctly
+> with replicator tracking. Instead, use `world.component()` after world creation:
+>
+> ```ts
+> // ❌ Avoid — preregistered tag, created before world
+> const Dead = Jecs.tag();
+>
+> // ✅ Prefer — created within the world, compatible with replication
+> const Dead = world.component() as Jecs.Tag;
+> const Invisible = world.component() as Jecs.Tag;
+> ```
+>
+> In TypeScript, you can type these as `Tag` for clarity:
+>
+> ```ts
+> import type { Tag } from "@rbxts/jecs";
+> const Dead = world.component<Tag>();
+> ```
+>
+> `Jecs.tag()` is still fine for non-replicated, local-only tags.
+
 ```ts
 import { World } from "@rbxts/jecs";
 import Replecs from "@rbxts/replecs-extended";
